@@ -800,7 +800,9 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 })
 
 client.on('messageCreate', msg => {
-  if (msg.author.bot) return
+  // Patched: only ignore self-messages, allow other bots through gate()
+  // See: https://github.com/anthropics/claude-plugins-official/issues/936
+  if (msg.author.id === client.user?.id) return
   handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
 })
 
