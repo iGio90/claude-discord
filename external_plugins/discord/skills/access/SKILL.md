@@ -43,11 +43,16 @@ Arguments passed: `$ARGUMENTS`
       "createdAt": <ms>, "expiresAt": <ms>
     }
   },
-  "mentionPatterns": ["@mybot"]
+  "mentionPatterns": ["@mybot"],
+  "ignoreChannels": ["<channelId>", ...]
 }
 ```
 
 Missing file = `{dmPolicy:"pairing", allowFrom:[], groups:{}, pending:{}}`.
+
+`ignoreChannels` (optional) lists channel IDs whose inbound messages and
+reactions are never delivered; a thread follows its parent. Posting to them
+still works when they are in `groups`. Preserve it on every write.
 
 ---
 
@@ -59,7 +64,7 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 
 1. Read `~/.claude/channels/discord/access.json` (handle missing file).
 2. Show: dmPolicy, allowFrom count and list, pending count with codes +
-   sender IDs + age, groups count.
+   sender IDs + age, groups count, ignoreChannels list (if any).
 
 ### `pair <code>`
 
@@ -109,12 +114,13 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 ### `set <key> <value>`
 
 Delivery/UX config. Supported keys: `ackReaction`, `replyToMode`,
-`textChunkLimit`, `chunkMode`, `mentionPatterns`. Validate types:
+`textChunkLimit`, `chunkMode`, `mentionPatterns`, `ignoreChannels`. Validate types:
 - `ackReaction`: string (emoji) or `""` to disable
 - `replyToMode`: `off` | `first` | `all`
 - `textChunkLimit`: number
 - `chunkMode`: `length` | `newline`
 - `mentionPatterns`: JSON array of regex strings
+- `ignoreChannels`: JSON array of channel ID strings
 
 Read, set the key, write, confirm.
 

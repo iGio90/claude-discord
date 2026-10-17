@@ -118,6 +118,8 @@ type Access = {
   groups: Record<string, GroupPolicy>
   pending: Record<string, PendingEntry>
   mentionPatterns?: string[]
+  /** Channel IDs whose messages and reactions are never delivered; threads follow their parent. Outbound is unaffected. */
+  ignoreChannels?: string[]
   // delivery/UX config — optional, defaults live in the reply handler
   /** Emoji to react with on receipt. Empty string disables. Unicode char or custom emoji ID. */
   ackReaction?: string
@@ -157,6 +159,18 @@ function assertSendable(f: string): void {
   }
 }
 
+// Keeps the string entries of an array; anything else yields [].
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+// True when the channel, or a thread's parent, is in access.ignoreChannels.
+function isIgnoredChannel(access: Access, channelId: string, parentId?: string | null): boolean {
+  const ignored = access.ignoreChannels
+  if (!ignored || ignored.length === 0) return false
+  return ignored.includes(channelId) || (parentId != null && ignored.includes(parentId))
+}
+
 function readAccessFile(): Access {
   try {
     const raw = readFileSync(ACCESS_FILE, 'utf8')
@@ -167,6 +181,7 @@ function readAccessFile(): Access {
       groups: parsed.groups ?? {},
       pending: parsed.pending ?? {},
       mentionPatterns: parsed.mentionPatterns,
+      ignoreChannels: parsed.ignoreChannels === undefined ? undefined : strings(parsed.ignoreChannels),
       ackReaction: parsed.ackReaction,
       replyToMode: parsed.replyToMode,
       textChunkLimit: parsed.textChunkLimit,
@@ -242,6 +257,9 @@ function noteSent(id: string): void {
 
 async function gate(msg: Message): Promise<GateResult> {
   const access = loadAccess()
+  const parentId = msg.channel.isThread() ? msg.channel.parentId : null
+  if (isIgnoredChannel(access, msg.channelId, parentId)) return { action: 'drop' }
+
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
 
@@ -307,6 +325,7 @@ function reactionAllowed(access: Access, msg: Message | PartialMessage, userId: 
   const channel = msg.channel
   if (!channel) return false
   if (channel.type === ChannelType.DM) return access.allowFrom.includes(userId)
+  if (isIgnoredChannel(access, msg.channelId, channel.isThread() ? channel.parentId : null)) return false
   const channelId = channel.isThread() ? channel.parentId ?? msg.channelId : msg.channelId
   const policy = access.groups[channelId]
   if (!policy) return false

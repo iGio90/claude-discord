@@ -58,6 +58,14 @@ With the default `requireMention: true`, the bot responds only when @mentioned o
 /discord:access group rm 846209781206941736
 ```
 
+## Ignored channels
+
+`ignoreChannels` lists channel snowflakes whose messages and reactions are never delivered to Claude, whatever `groups` says. A thread is ignored when its parent channel is listed. The check runs before any other inbound work, so ignored traffic costs no fetch or lookup. Outbound is unaffected: Claude can still post to an ignored channel that is in `groups`. Use it for channels Claude writes to but should not be woken by, such as an alerts or journal channel. Non-string entries are ignored.
+
+```
+/discord:access set ignoreChannels '["1559558623833882675"]'
+```
+
 ## Mention detection
 
 In channels with `requireMention: true`, any of the following triggers the bot:
@@ -101,7 +109,7 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
 | `/discord:access policy allowlist` | Set `dmPolicy`. Values: `pairing`, `allowlist`, `disabled`. |
 | `/discord:access group add 846209781206941736` | Enable a guild channel. Flags: `--no-mention`, `--allow id1,id2`. |
 | `/discord:access group rm 846209781206941736` | Disable a guild channel. |
-| `/discord:access set ackReaction 🔨` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`. |
+| `/discord:access set ackReaction 🔨` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`, `ignoreChannels`. |
 
 ## Config file
 
@@ -124,6 +132,9 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
       "allowFrom": []
     }
   },
+
+  // Channels (and their threads) never delivered inbound. Posting there still works.
+  "ignoreChannels": [],
 
   // Case-insensitive regexes that count as a mention.
   "mentionPatterns": ["^hey claude\\b"],
