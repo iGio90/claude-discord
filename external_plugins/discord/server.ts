@@ -22,6 +22,7 @@ import {
   GatewayIntentBits,
   Partials,
   ChannelType,
+  MessageReferenceType,
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
@@ -434,6 +435,35 @@ function safeAttName(att: Attachment): string {
   return (att.name ?? att.id).replace(/[\[\]\r\n;]/g, '_')
 }
 
+const REPLY_FETCH_TIMEOUT_MS = 1500
+const REPLY_SNIPPET_MAX = 200
+
+// Flattens quoted text to one line, capped at REPLY_SNIPPET_MAX chars.
+function replySnippet(text: string): string {
+  const flat = text.replace(/[\r\n]+/g, ' ⏎ ').trim()
+  return flat.length > REPLY_SNIPPET_MAX ? flat.slice(0, REPLY_SNIPPET_MAX - 1) + '…' : flat
+}
+
+// Meta for a quote-reply: the referenced id always, author and snippet when the
+// message resolves (gateway cache first, else a fetch bounded by REPLY_FETCH_TIMEOUT_MS).
+async function replyMeta(msg: Message): Promise<Record<string, string>> {
+  const ref = msg.reference
+  if (!ref?.messageId || ref.type === MessageReferenceType.Forward) return {}
+  const meta: Record<string, string> = { reply_to: ref.messageId }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const quoted = await Promise.race([
+    msg.fetchReference().catch(() => null),
+    new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), REPLY_FETCH_TIMEOUT_MS) }),
+  ])
+  clearTimeout(timer)
+  if (quoted) {
+    meta.reply_to_author = quoted.author.username
+    const text = replySnippet(quoted.content)
+    if (text) meta.reply_to_text = text
+  }
+  return meta
+}
+
 const mcp = new Server(
   { name: 'discord', version: '1.0.0' },
   {
@@ -452,7 +482,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the message quote-replies an earlier one, the tag also has reply_to (the quoted message_id) and, when it could be resolved, reply_to_author and reply_to_text (a one-line snippet of up to 200 chars) — use them to tell what a short answer like "yes" refers to. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -866,6 +896,7 @@ async function handleInbound(msg: Message): Promise<void> {
   // Attachment listing goes in meta only — an in-content annotation is
   // forgeable by any allowlisted sender typing that string.
   const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
+  const reply = await replyMeta(msg)
 
   mcp.notification({
     method: 'notifications/claude/channel',
@@ -877,6 +908,7 @@ async function handleInbound(msg: Message): Promise<void> {
         user: msg.author.username,
         user_id: msg.author.id,
         ts: msg.createdAt.toISOString(),
+        ...reply,
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
       },
     },

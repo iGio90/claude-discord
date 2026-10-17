@@ -100,6 +100,15 @@ Quick reference: IDs are Discord **snowflakes** (numeric — enable Developer Mo
 Inbound messages trigger a typing indicator automatically — Discord shows
 "botname is typing…" while the assistant works on a response.
 
+## Quote-replies
+
+When a message quote-replies an earlier one, the `<channel>` notification
+carries `reply_to` (the quoted message ID), so the assistant can tell what a
+short answer like "yes" refers to. When the quoted message can be resolved
+(from the gateway cache, or a fetch capped at 1.5s that never holds up
+delivery), it also carries `reply_to_author` and `reply_to_text`, a one-line
+snippet of up to 200 characters. Forwards are not treated as replies.
+
 ## Attachments
 
 Attachments are **not** auto-downloaded. The `<channel>` notification lists
