@@ -105,9 +105,13 @@ Inbound messages trigger a typing indicator automatically — Discord shows
 When a message quote-replies an earlier one, the `<channel>` notification
 carries `reply_to` (the quoted message ID), so the assistant can tell what a
 short answer like "yes" refers to. When the quoted message can be resolved
-(from the gateway cache, or a fetch capped at 1.5s that never holds up
-delivery), it also carries `reply_to_author` and `reply_to_text`, a one-line
+(from the gateway cache, or a fetch capped at 1.5s that never drops the
+message), it also carries `reply_to_author` and `reply_to_text`, a one-line
 snippet of up to 200 characters. Forwards are not treated as replies.
+
+Messages in one chat reach the assistant in the order they arrived: while a
+quote-reply's lookup is pending, later messages in the same chat wait for it
+(at most 1.5s); other chats do not wait.
 
 ## Attachments
 

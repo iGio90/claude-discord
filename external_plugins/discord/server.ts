@@ -464,6 +464,21 @@ async function replyMeta(msg: Message): Promise<Record<string, string>> {
   return meta
 }
 
+// Tail of each chat's inbound delivery chain, so messages reach Claude in arrival order.
+const deliveryChains = new Map<string, Promise<void>>()
+
+// Runs deliver after the previous delivery in the same chat; other chats never wait.
+function deliverInOrder(chatId: string, deliver: () => Promise<void>): void {
+  const prev = deliveryChains.get(chatId) ?? Promise.resolve()
+  const done = prev.then(deliver).catch(err => {
+    process.stderr.write(`discord channel: inbound delivery failed: ${err}\n`)
+  })
+  deliveryChains.set(chatId, done)
+  void done.finally(() => {
+    if (deliveryChains.get(chatId) === done) deliveryChains.delete(chatId)
+  })
+}
+
 const mcp = new Server(
   { name: 'discord', version: '1.0.0' },
   {
@@ -896,24 +911,27 @@ async function handleInbound(msg: Message): Promise<void> {
   // Attachment listing goes in meta only — an in-content annotation is
   // forgeable by any allowlisted sender typing that string.
   const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
-  const reply = await replyMeta(msg)
+  // The lookup starts now and settles within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
+  const reply = replyMeta(msg).catch(() => ({}))
 
-  mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content,
-      meta: {
-        chat_id,
-        message_id: msg.id,
-        user: msg.author.username,
-        user_id: msg.author.id,
-        ts: msg.createdAt.toISOString(),
-        ...reply,
-        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+  deliverInOrder(chat_id, async () => {
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id,
+          message_id: msg.id,
+          user: msg.author.username,
+          user_id: msg.author.id,
+          ts: msg.createdAt.toISOString(),
+          ...(await reply),
+          ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+        },
       },
-    },
-  }).catch(err => {
-    process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
+    })
   })
 }
 
