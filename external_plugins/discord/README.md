@@ -113,6 +113,21 @@ Messages in one chat reach the assistant in the order they arrived: while a
 quote-reply's lookup is pending, later messages in the same chat wait for it
 (at most 1.5s); other chats do not wait.
 
+## Reactions
+
+When someone adds a reaction to a message this bot posted, the assistant gets
+a `<channel>` notification with `event="reaction"`, the `emoji`, the reactor's
+`user`/`user_id`, the reacted `message_id`, `chat_id`, `ts` and a
+`reacted_text` snippet of the bot's message (one line, up to 200 characters).
+It is an acknowledgement, not a request. Reactions on other people's messages
+and the bot's own reactions are not delivered, and neither are removals.
+
+The reactor passes the same gate as a message sender: `allowFrom` for DMs,
+the channel's group policy (and its `allowFrom`) in guilds. A reaction on the
+bot's own message counts as the mention, so `requireMention` does not apply.
+Reactions on older, uncached messages still arrive; looking them up is capped
+at 1.5s and does not hold up other chats.
+
 ## Attachments
 
 Attachments are **not** auto-downloaded. The `<channel>` notification lists
