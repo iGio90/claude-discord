@@ -22,10 +22,16 @@ import {
   GatewayIntentBits,
   Partials,
   ChannelType,
+  MessageReferenceType,
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
   type Message,
+  type PartialMessage,
+  type MessageReaction,
+  type PartialMessageReaction,
+  type User,
+  type PartialUser,
   type Attachment,
   type Interaction,
 } from 'discord.js'
@@ -84,9 +90,12 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessageReactions,
   ],
   // DMs arrive as partial channels — messageCreate never fires without this.
-  partials: [Partials.Channel],
+  // Message/Reaction/User partials let reactions on uncached messages through.
+  partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
 })
 
 type PendingEntry = {
@@ -291,6 +300,20 @@ async function gate(msg: Message): Promise<GateResult> {
   return { action: 'deliver', access }
 }
 
+// Reaction gate: the reactor must pass the same allowlists as a message sender.
+// A reaction on our own message stands in for the mention. No pairing.
+function reactionAllowed(access: Access, msg: Message | PartialMessage, userId: string): boolean {
+  if (access.dmPolicy === 'disabled') return false
+  const channel = msg.channel
+  if (!channel) return false
+  if (channel.type === ChannelType.DM) return access.allowFrom.includes(userId)
+  const channelId = channel.isThread() ? channel.parentId ?? msg.channelId : msg.channelId
+  const policy = access.groups[channelId]
+  if (!policy) return false
+  const groupAllowFrom = policy.allowFrom ?? []
+  return groupAllowFrom.length === 0 || groupAllowFrom.includes(userId)
+}
+
 async function isMentioned(msg: Message, extraPatterns?: string[]): Promise<boolean> {
   if (client.user && msg.mentions.has(client.user)) return true
 
@@ -434,6 +457,56 @@ function safeAttName(att: Attachment): string {
   return (att.name ?? att.id).replace(/[\[\]\r\n;]/g, '_')
 }
 
+const REPLY_FETCH_TIMEOUT_MS = 1500
+const REPLY_SNIPPET_MAX = 200
+
+// Flattens quoted text to one line, capped at REPLY_SNIPPET_MAX chars.
+function replySnippet(text: string): string {
+  const flat = text.replace(/[\r\n]+/g, ' ⏎ ').trim()
+  return flat.length > REPLY_SNIPPET_MAX ? flat.slice(0, REPLY_SNIPPET_MAX - 1) + '…' : flat
+}
+
+// Resolves to p's value, or null once ms elapse first.
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const out = await Promise.race([
+    p,
+    new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), ms) }),
+  ])
+  clearTimeout(timer)
+  return out
+}
+
+// Meta for a quote-reply: the referenced id always, author and snippet when the
+// message resolves (gateway cache first, else a fetch bounded by REPLY_FETCH_TIMEOUT_MS).
+async function replyMeta(msg: Message): Promise<Record<string, string>> {
+  const ref = msg.reference
+  if (!ref?.messageId || ref.type === MessageReferenceType.Forward) return {}
+  const meta: Record<string, string> = { reply_to: ref.messageId }
+  const quoted = await withTimeout(msg.fetchReference().catch(() => null), REPLY_FETCH_TIMEOUT_MS)
+  if (quoted) {
+    meta.reply_to_author = quoted.author.username
+    const text = replySnippet(quoted.content)
+    if (text) meta.reply_to_text = text
+  }
+  return meta
+}
+
+// Tail of each chat's inbound delivery chain, so messages reach Claude in arrival order.
+const deliveryChains = new Map<string, Promise<void>>()
+
+// Runs deliver after the previous delivery in the same chat; other chats never wait.
+function deliverInOrder(chatId: string, deliver: () => Promise<void>): void {
+  const prev = deliveryChains.get(chatId) ?? Promise.resolve()
+  const done = prev.then(deliver).catch(err => {
+    process.stderr.write(`discord channel: inbound delivery failed: ${err}\n`)
+  })
+  deliveryChains.set(chatId, done)
+  void done.finally(() => {
+    if (deliveryChains.get(chatId) === done) deliveryChains.delete(chatId)
+  })
+}
+
 const mcp = new Server(
   { name: 'discord', version: '1.0.0' },
   {
@@ -452,7 +525,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the message quote-replies an earlier one, the tag also has reply_to (the quoted message_id) and, when it could be resolved, reply_to_author and reply_to_text (a one-line snippet of up to 200 chars) — use them to tell what a short answer like "yes" refers to. A tag with event="reaction" means someone reacted (emoji attribute) to one of your own messages (message_id, with a reacted_text snippet): it is an acknowledgement that they read it, not a request — do not reply to it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -866,22 +939,78 @@ async function handleInbound(msg: Message): Promise<void> {
   // Attachment listing goes in meta only — an in-content annotation is
   // forgeable by any allowlisted sender typing that string.
   const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
+  // The lookup starts now and settles within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
+  const reply = replyMeta(msg).catch(() => ({}))
 
-  mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content,
-      meta: {
-        chat_id,
-        message_id: msg.id,
-        user: msg.author.username,
-        user_id: msg.author.id,
-        ts: msg.createdAt.toISOString(),
-        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+  deliverInOrder(chat_id, async () => {
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id,
+          message_id: msg.id,
+          user: msg.author.username,
+          user_id: msg.author.id,
+          ts: msg.createdAt.toISOString(),
+          ...(await reply),
+          ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+        },
       },
-    },
-  }).catch(err => {
-    process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
+    })
+  })
+}
+
+client.on('messageReactionAdd', (reaction, user) => {
+  if (user.id === client.user?.id) return
+  handleReaction(reaction, user).catch(e => process.stderr.write(`discord: handleReaction failed: ${e}\n`))
+})
+
+// Delivers a reaction on one of our own messages as an acknowledgement event.
+// Lookups of partial messages/users are bounded by REPLY_FETCH_TIMEOUT_MS.
+async function handleReaction(
+  reaction: MessageReaction | PartialMessageReaction,
+  user: User | PartialUser,
+): Promise<void> {
+  const msg = reaction.message
+  if (!reactionAllowed(loadAccess(), msg, user.id)) return
+  const knownOurs = recentSentIds.has(msg.id) || (!msg.partial && msg.author.id === client.user?.id)
+  if (!knownOurs && !msg.partial) return
+
+  const chat_id = msg.channelId
+  const ts = new Date().toISOString()
+  const emoji = reaction.emoji.id ? `:${reaction.emoji.name ?? reaction.emoji.id}:` : reaction.emoji.name ?? ''
+  const full = msg.partial
+    ? withTimeout(msg.fetch().catch(() => null), REPLY_FETCH_TIMEOUT_MS)
+    : Promise.resolve(msg)
+  const username = user.partial
+    ? withTimeout(user.fetch().then(u => u.username).catch(() => null), REPLY_FETCH_TIMEOUT_MS)
+    : Promise.resolve(user.username)
+
+  deliverInOrder(chat_id, async () => {
+    const [m, name] = await Promise.all([full, username])
+    if (!knownOurs && m?.author.id !== client.user?.id) return
+    const text = m ? replySnippet(m.content) : ''
+    mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: '(reaction)',
+        meta: {
+          event: 'reaction',
+          chat_id,
+          message_id: msg.id,
+          emoji,
+          user: name ?? user.id,
+          user_id: user.id,
+          ts,
+          ...(text ? { reacted_text: text } : {}),
+        },
+      },
+    }).catch(err => {
+      process.stderr.write(`discord channel: failed to deliver reaction to Claude: ${err}\n`)
+    })
   })
 }
 
