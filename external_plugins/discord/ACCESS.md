@@ -60,7 +60,7 @@ With the default `requireMention: true`, the bot responds only when @mentioned o
 
 ## Ignored channels
 
-`ignoreChannels` lists channel snowflakes whose messages and reactions are never delivered to Claude, whatever `groups` says. A thread is ignored when its parent channel is listed. The check runs before any other inbound work, so ignored traffic costs no fetch or lookup. Outbound is unaffected: Claude can still post to an ignored channel that is in `groups`. Use it for channels Claude writes to but should not be woken by, such as an alerts or journal channel. Non-string entries are ignored.
+`ignoreChannels` lists channel snowflakes whose messages and reactions are never delivered to Claude, whatever `groups` says. A thread is ignored when its parent channel is listed. DMs are not affected. The check runs before any fetch or reply lookup, so ignored traffic costs nothing. Outbound is unaffected: Claude can still post to an ignored channel that is in `groups`. Use it for channels Claude writes to but should not be woken by, such as an alerts or journal channel. Non-string entries are ignored.
 
 ```
 /discord:access set ignoreChannels '["1559558623833882675"]'

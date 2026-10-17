@@ -257,9 +257,6 @@ function noteSent(id: string): void {
 
 async function gate(msg: Message): Promise<GateResult> {
   const access = loadAccess()
-  const parentId = msg.channel.isThread() ? msg.channel.parentId : null
-  if (isIgnoredChannel(access, msg.channelId, parentId)) return { action: 'drop' }
-
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
 
@@ -297,6 +294,9 @@ async function gate(msg: Message): Promise<GateResult> {
     saveAccess(access)
     return { action: 'pair', code, isResend: false }
   }
+
+  const parentId = msg.channel.isThread() ? msg.channel.parentId : null
+  if (isIgnoredChannel(access, msg.channelId, parentId)) return { action: 'drop' }
 
   // We key on channel ID (not guild ID) — simpler, and lets the user
   // opt in per-channel rather than per-server. Threads inherit their
