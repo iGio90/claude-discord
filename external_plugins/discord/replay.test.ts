@@ -1,37 +1,70 @@
-// Twin of iGio90/claude-builder image/bridge/replay.test.ts: keep both identical but for this line.
+// Copied into iGio90/claude-builder image/bridge/ by its sync-replay.ts; edit it here.
 import { expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { BOUNDS, Cursors, Replay, fetchMissed, floor, newer, select, snowflakeAt, type Msg } from './replay.ts'
+import { dirname, join } from 'node:path'
+import { BOUNDS, Cursors, Replay, fetchMissed, floor, newer, select, snowflakeAt, type Handed, type Msg, type ReplayOptions } from './replay.ts'
 
 const NOW = Date.parse('2026-10-19T12:00:00Z')
 const MIN = 60_000
 const idAt = (ms: number, n = 0) => (BigInt(snowflakeAt(ms)) + BigInt(n)).toString()
-const cursorFile = () => join(mkdtempSync(join(tmpdir(), 'replay-')), 'replay.json')
 // An id from a minute ago; the cursor prunes entries older than a week.
 const live = (n: number) => idAt(Date.now() - MIN, n)
+const cursorFile = () => join(mkdtempSync(join(tmpdir(), 'replay-')), 'replay.json')
 const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
+const taken = (): Handed => ({ taken: Promise.resolve() })
 
-test('a cursor advances only forward and survives a restart', () => {
+// A replay whose gate admits every message, unless told otherwise.
+function replayOf(cursors: Cursors, over: Partial<ReplayOptions<Msg>> = {}) {
+  return new Replay<Msg>({
+    cursors,
+    log: () => {},
+    inScope: () => true,
+    handle: async () => taken(),
+    prepare: async () => async () => taken(),
+    ...over,
+  })
+}
+
+test('a cursor advances only forward and survives a restart, leaving no temp file', () => {
   const file = cursorFile()
   const a = new Cursors(file, () => {})
   a.advance('1', idAt(NOW - MIN), NOW)
   a.advance('1', idAt(NOW - 2 * MIN), NOW)
   expect(new Cursors(file, () => {}).get('1')).toBe(idAt(NOW - MIN))
   expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ '1': idAt(NOW - MIN) })
+  expect(readdirSync(dirname(file))).toEqual(['replay.json'])
 })
 
-test('the cursor advances only after the message is handled', async () => {
+test('the cursor advances only once the agent has the message', async () => {
   const cursors = new Cursors(cursorFile(), () => {})
   const [a, b] = [live(1), live(2)]
-  const replay = new Replay<Msg>({ cursors, log: () => {}, handle: async m => { if (m.id === b) throw new Error('mcp closed') } })
+  let take!: () => void
+  const replay = replayOf(cursors, {
+    handle: async m => {
+      if (m.id === b) throw new Error('mcp closed')
+      return { taken: new Promise<void>(r => (take = r)) }
+    },
+  })
   await replay.run(async () => [])
   replay.live({ id: a, channelId: '1' })
   replay.live({ id: b, channelId: '2' })
   await tick(5)
+  expect(cursors.get('1')).toBeUndefined()
+  take()
+  await tick(5)
   expect(cursors.get('1')).toBe(a)
   expect(cursors.get('2')).toBeUndefined()
+})
+
+test('a channel out of scope keeps no cursor', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const replay = replayOf(cursors, { inScope: m => m.channelId !== '7' })
+  await replay.run(async () => [])
+  replay.live({ id: live(1), channelId: '7' })
+  replay.live({ id: live(2), channelId: '1' })
+  await tick(5)
+  expect(cursors.channels()).toEqual(['1'])
 })
 
 test('the replay floor is the cursor, never older than the age bound', () => {
@@ -44,11 +77,24 @@ test('the replay floor is the cursor, never older than the age bound', () => {
   expect(floor(cursors, '3', NOW, BOUNDS)).toBe(idAt(NOW - 5 * MIN))
 })
 
-test('past the count bound the oldest messages are dropped', () => {
-  const msgs = [3, 1, 2, 2].map(n => ({ id: String(n), channelId: '1' }))
-  const { keep, dropped } = select(msgs, { ...BOUNDS, maxCount: 2 })
+test('past the count bound the oldest are dropped', () => {
+  const { keep, dropped } = select([3, 1, 2, 2].map(n => ({ id: String(n) })), 2)
   expect(keep.map(m => m.id)).toEqual(['2', '3'])
   expect(dropped.map(m => m.id)).toEqual(['1'])
+})
+
+test('the count bound applies after the gate, so unaddressed traffic does not push out an addressed message', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const id = [0, 1, 2, 3, 4].map(live)
+  cursors.advance('1', id[0]!)
+  const delivered: string[] = []
+  const replay = replayOf(cursors, {
+    bounds: { ...BOUNDS, maxCount: 1 },
+    prepare: async m => (m.id === id[1] ? async () => { delivered.push(m.id); return taken() } : null),
+  })
+  await replay.run(async () => id.slice(1).map(i => ({ id: i, channelId: '1' })))
+  expect(delivered).toEqual([id[1]!])
+  expect(cursors.get('1')).toBe(id[4])
 })
 
 test('a message held live during the replay and also replayed is handled once, after the replay', async () => {
@@ -56,29 +102,51 @@ test('a message held live during the replay and also replayed is handled once, a
   const id = [5, 6, 7, 8, 9].map(live)
   cursors.advance('1', id[0]!)
   const handled: string[] = []
-  const replay = new Replay<Msg>({ cursors, log: () => {}, handle: async (m, late) => { handled.push(`${id.indexOf(m.id) + 5}${late ? 'L' : ''}`) } })
+  const name = (m: Msg) => String(id.indexOf(m.id) + 5)
+  const replay = replayOf(cursors, {
+    handle: async (m, late) => { handled.push(`${name(m)}${late ? 'H' : ''}`); return taken() },
+    prepare: async m => async () => { handled.push(`${name(m)}R`); return taken() },
+  })
   replay.live({ id: id[2]!, channelId: '1' })
   replay.live({ id: id[3]!, channelId: '1' })
   await replay.run(async () => [{ id: id[1]!, channelId: '1' }, { id: id[2]!, channelId: '1' }])
-  await tick(5)
   replay.live({ id: id[3]!, channelId: '1' })
   replay.live({ id: id[4]!, channelId: '1' })
   await tick(5)
-  expect(handled).toEqual(['6L', '7L', '8L', '9'])
+  expect(handled).toEqual(['6R', '7R', '8H', '9'])
   expect(cursors.get('1')).toBe(id[4])
+})
+
+test('a replay that outlasts the hold reads every floor as of its start and keeps the gap until it is taken', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const [start, missed, held] = [live(1), live(2), live(3)]
+  cursors.advance('1', start)
+  cursors.advance('2', start)
+  const floors: (string | null)[] = []
+  const replay = replayOf(cursors, { bounds: { ...BOUNDS, holdMs: 20 } })
+  replay.live({ id: held, channelId: '2' })
+  const run = replay.run(async floorOf => {
+    await tick(60)
+    floors.push(floorOf('2'), floorOf('3'))
+    return [{ id: missed, channelId: '2' }]
+  })
+  await tick(40)
+  expect(cursors.get('2')).toBe(start)
+  await run
+  expect(floors).toEqual([start, start])
+  expect(cursors.get('2')).toBe(held)
 })
 
 test('without saved state nothing is fetched', async () => {
   let fetched = false
-  const replay = new Replay<Msg>({ cursors: new Cursors(cursorFile(), () => {}), log: () => {}, handle: async () => {} })
-  await replay.run(async () => { fetched = true; return [] })
+  await replayOf(new Cursors(cursorFile(), () => {})).run(async () => { fetched = true; return [] })
   expect(fetched).toBe(false)
 })
 
 const BOT = '9'
 type Fake = { id: string; author: { id: string } }
 
-function channel(id: string, msgs: Fake[], parentId: string | null = null, threads: unknown[] = []) {
+function channel(id: string, msgs: Fake[], parentId: string | null = null, threads: { id: string }[] = []) {
   return {
     id,
     parentId,
@@ -91,16 +159,17 @@ function channel(id: string, msgs: Fake[], parentId: string | null = null, threa
           .map(m => [m.id, m]),
       ),
     },
-    threads: { fetchActive: async () => ({ threads: new Map(threads.map(t => [(t as { id: string }).id, t])) }) },
+    guild: { id: 'g', channels: { fetchActiveThreads: async () => ({ threads: new Map(threads.map(t => [t.id, t])) }) } },
   }
 }
 
-test('the replay covers the shared channel and its active threads, not ignored threads or own messages', async () => {
+test('the replay covers the shared channel and its active threads, not ignored or foreign threads or own messages', async () => {
   const old = { id: idAt(NOW - 10 * MIN), author: { id: '1' } }
   const zap = channel('20', [{ id: idAt(NOW - MIN, 1), author: { id: '1' } }], '10')
   const feed = channel('21', [{ id: idAt(NOW - MIN, 2), author: { id: '1' } }], '10')
-  const shared = channel('10', [old, { id: idAt(NOW - MIN, 3), author: { id: '1' } }, { id: idAt(NOW - MIN, 4), author: { id: BOT } }], null, [zap, feed])
-  const all: Record<string, unknown> = { 10: shared, 20: zap, 21: feed }
+  const foreign = channel('22', [{ id: idAt(NOW - MIN, 5), author: { id: '1' } }], '99')
+  const shared = channel('10', [old, { id: idAt(NOW - MIN, 3), author: { id: '1' } }, { id: idAt(NOW - MIN, 4), author: { id: BOT } }], null, [zap, feed, foreign])
+  const all: Record<string, unknown> = { 10: shared, 20: zap, 21: feed, 22: foreign }
   const client = { user: { id: BOT }, channels: { fetch: async (id: string) => all[id] ?? null } }
   const got = await fetchMissed(client as never, {
     groups: ['10'],
@@ -111,7 +180,7 @@ test('the replay covers the shared channel and its active threads, not ignored t
   expect(got.map(m => m.id).sort()).toEqual([idAt(NOW - MIN, 1), idAt(NOW - MIN, 3)].sort())
 })
 
-test('a channel with more missed messages than the bound yields its newest ones', async () => {
+test('a channel with more missed messages than the fetch cap yields its newest ones', async () => {
   const msgs = Array.from({ length: 250 }, (_, i) => ({ id: idAt(NOW - MIN, i), author: { id: '1' } }))
   const client = { user: { id: BOT }, channels: { fetch: async () => channel('10', msgs) } }
   const logs: string[] = []
@@ -119,5 +188,5 @@ test('a channel with more missed messages than the bound yields its newest ones'
   expect(got.length).toBe(120)
   expect(got.map(m => m.id)).toContain(idAt(NOW - MIN, 249))
   expect(got.map(m => m.id)).not.toContain(idAt(NOW - MIN, 129))
-  expect(logs.some(l => l.includes('older ones not replayed'))).toBe(true)
+  expect(logs.some(l => l.includes('older ones not read'))).toBe(true)
 })

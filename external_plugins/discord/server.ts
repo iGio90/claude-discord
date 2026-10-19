@@ -40,7 +40,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, sep } from 'path'
-import { Cursors, Replay, fetchMissed } from './replay.ts'
+import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -258,7 +258,8 @@ function noteSent(id: string): void {
   }
 }
 
-async function gate(msg: Message): Promise<GateResult> {
+// replayed: a missed message, which never starts a pairing. See DESIGN.md#replay
+async function gate(msg: Message, replayed = false): Promise<GateResult> {
   const access = loadAccess()
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
@@ -270,7 +271,7 @@ async function gate(msg: Message): Promise<GateResult> {
 
   if (isDM) {
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
-    if (access.dmPolicy === 'allowlist') return { action: 'drop' }
+    if (replayed || access.dmPolicy === 'allowlist') return { action: 'drop' }
 
     // pairing mode — check for existing non-expired code for this sender
     for (const [code, p] of Object.entries(access.pending)) {
@@ -550,7 +551,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the message quote-replies an earlier one, the tag also has reply_to (the quoted message_id) and, when it could be resolved, reply_to_author and reply_to_text (a one-line snippet of up to 200 chars) — use them to tell what a short answer like "yes" refers to. A tag with event="reaction" means someone reacted (emoji attribute) to one of your own messages (message_id, with a reacted_text snippet): it is an acknowledgement that they read it, not a request — do not reply to it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the message quote-replies an earlier one, the tag also has reply_to (the quoted message_id) and, when it could be resolved, reply_to_author and reply_to_text (a one-line snippet of up to 200 chars) — use them to tell what a short answer like "yes" refers to. A tag with event="reaction" means someone reacted (emoji attribute) to one of your own messages (message_id, with a reacted_text snippet): it is an acknowledgement that they read it, not a request — do not reply to it. A tag with replayed="true" was posted while you were offline and arrives late (ts is when it was posted): check with fetch_messages whether someone already handled it before acting. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -842,6 +843,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
+// The replay waits for Claude Code's initialized notification. See DESIGN.md#replay
+const mcpInitialized = new Promise<void>(resolve => { mcp.oninitialized = resolve })
 await mcp.connect(new StdioServerTransport())
 
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
@@ -924,15 +927,27 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     .catch(() => {})
 })
 
-// Live and replayed messages share handleInbound; see DESIGN.md#replay.
+// Live and replayed messages share judgeInbound; see DESIGN.md#replay.
 const replay = new Replay<Message>({
   cursors: new Cursors(REPLAY_FILE, logLine),
   handle: msg => handleInbound(msg),
+  prepare: async msg => {
+    const deliver = await judgeInbound(msg, true)
+    return deliver && (async () => { await deliver(); return { taken: Promise.resolve() } })
+  },
+  inScope: msg => inReplayScope(loadAccess(), msg),
   log: logLine,
 })
 
 function logLine(line: string): void {
   process.stderr.write(`discord channel: ${line}\n`)
+}
+
+// Channels whose cursor is kept: allowed DMs, the access groups and their threads.
+function inReplayScope(access: Access, msg: Message): boolean {
+  if (msg.channel.type === ChannelType.DM) return access.allowFrom.includes(msg.author.id)
+  const parentId = msg.channel.isThread() ? msg.channel.parentId : null
+  return !isIgnoredChannel(access, msg.channelId, parentId) && (parentId ?? msg.channelId) in access.groups
 }
 
 client.on('messageCreate', msg => {
@@ -942,11 +957,20 @@ client.on('messageCreate', msg => {
   replay.live(msg)
 })
 
-// Resolves once the message is delivered to Claude or deliberately dropped.
-async function handleInbound(msg: Message): Promise<void> {
-  const result = await gate(msg)
+// Resolves once the message is delivered to Claude (Handed) or dropped (null).
+async function handleInbound(msg: Message): Promise<Handed | null> {
+  const deliver = await judgeInbound(msg, false)
+  if (!deliver) return null
+  await deliver()
+  return { taken: Promise.resolve() }
+}
 
-  if (result.action === 'drop') return
+// Gates the message; returns what delivers it in order, or null when it is
+// not for Claude. A replayed one gets no pairing, typing or ack, and is marked.
+async function judgeInbound(msg: Message, replayed: boolean): Promise<(() => Promise<void>) | null> {
+  const result = await gate(msg, replayed)
+
+  if (result.action === 'drop') return null
 
   if (result.action === 'pair') {
     const lead = result.isResend ? 'Still pending' : 'Pairing required'
@@ -957,7 +981,7 @@ async function handleInbound(msg: Message): Promise<void> {
     } catch (err) {
       process.stderr.write(`discord channel: failed to send pairing code: ${err}\n`)
     }
-    return
+    return null
   }
 
   const chat_id = msg.channelId
@@ -966,8 +990,10 @@ async function handleInbound(msg: Message): Promise<void> {
   // pending permission request, emit the structured event instead of
   // relaying as chat. The sender is already gate()-approved at this point
   // (non-allowlisted senders were dropped above), so we trust the reply.
+  // A replayed one answered a request of the previous session and is dropped.
   const permMatch = PERMISSION_REPLY_RE.exec(msg.content)
   if (permMatch) {
+    if (replayed) return null
     void mcp.notification({
       method: 'notifications/claude/channel/permission',
       params: {
@@ -977,18 +1003,19 @@ async function handleInbound(msg: Message): Promise<void> {
     })
     const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
     void msg.react(emoji).catch(() => {})
-    return
+    return null
   }
 
-  // Typing indicator — signals "processing" until we reply (or ~10s elapses).
-  if ('sendTyping' in msg.channel) {
-    void msg.channel.sendTyping().catch(() => {})
-  }
-
-  // Ack reaction — lets the user know we're processing. Fire-and-forget.
   const access = result.access
-  if (access.ackReaction) {
-    void msg.react(access.ackReaction).catch(() => {})
+  if (!replayed) {
+    // Typing indicator — signals "processing" until we reply (or ~10s elapses).
+    if ('sendTyping' in msg.channel) {
+      void msg.channel.sendTyping().catch(() => {})
+    }
+    // Ack reaction — lets the user know we're processing. Fire-and-forget.
+    if (access.ackReaction) {
+      void msg.react(access.ackReaction).catch(() => {})
+    }
   }
 
   // Attachments are listed (name/type/size) but not downloaded — the model
@@ -1006,7 +1033,7 @@ async function handleInbound(msg: Message): Promise<void> {
   // The lookup starts now and settles within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
   const reply = replyMeta(msg).catch(() => ({}))
 
-  await deliverInOrder(chat_id, async () => {
+  return () => deliverInOrder(chat_id, async () => {
     await mcp.notification({
       method: 'notifications/claude/channel',
       params: {
@@ -1017,6 +1044,7 @@ async function handleInbound(msg: Message): Promise<void> {
           user: msg.author.username,
           user_id: msg.author.id,
           ts: msg.createdAt.toISOString(),
+          ...(replayed ? { replayed: 'true' } : {}),
           ...(await reply),
           ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
         },
@@ -1076,8 +1104,9 @@ async function handleReaction(
   }).catch(() => {})
 }
 
-client.once('ready', c => {
+client.once('ready', async c => {
   process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
+  await mcpInitialized
   const access = loadAccess()
   void replay.run(floorOf => fetchMissed(c, {
     groups: Object.keys(access.groups),

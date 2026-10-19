@@ -1,7 +1,8 @@
 // Catch-up after a restart: a per-channel last-seen cursor on disk, a bounded
 // fetch of what was posted since, and dedupe against live delivery. See DESIGN.md#replay
-// Twin of iGio90/claude-builder image/bridge/replay.ts: keep both identical but for this line.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+// Copied into iGio90/claude-builder image/bridge/ by its sync-replay.ts; edit it here.
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Client, Message } from 'discord.js'
 
@@ -10,11 +11,15 @@ const CURSOR_TTL_MS = 7 * 24 * 60 * 60_000
 const CLAIMED_CAP = 2048
 const PAGE = 100
 
-export type Bounds = { maxAgeMs: number; maxCount: number; holdMs: number }
-// holdMs: how long live messages wait for the replay before they go out anyway.
-export const BOUNDS: Bounds = { maxAgeMs: 30 * 60_000, maxCount: 100, holdMs: 30_000 }
+// maxCount: messages handed to the agent, after the gate; fetchCap: messages
+// read per channel; holdMs: how long live messages wait for the replay.
+export type Bounds = { maxAgeMs: number; maxCount: number; fetchCap: number; holdMs: number }
+export const BOUNDS: Bounds = { maxAgeMs: 30 * 60_000, maxCount: 100, fetchCap: 500, holdMs: 30_000 }
 
 export type Msg = { id: string; channelId: string }
+
+// taken settles once the agent has the message, not just its queue.
+export type Handed = { taken: Promise<void> }
 
 export function snowflakeTime(id: string): number {
   return Number((BigInt(id) >> 22n) + DISCORD_EPOCH)
@@ -70,12 +75,13 @@ export class Cursors {
     for (const [ch, last] of Object.entries(this.ids)) {
       if (now - snowflakeTime(last) > CURSOR_TTL_MS) delete this.ids[ch]
     }
+    const tmp = `${this.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
     try {
       mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })
-      const tmp = `${this.file}.tmp`
       writeFileSync(tmp, JSON.stringify(this.ids) + '\n', { mode: 0o600 })
       renameSync(tmp, this.file)
     } catch (err) {
+      rmSync(tmp, { force: true })
       this.log(`replay: cannot save ${this.file}: ${err}`)
     }
   }
@@ -89,26 +95,39 @@ export function floor(cursors: Cursors, channelId: string, now: number, bounds: 
   return newer(last, oldest) ? last : oldest
 }
 
+// Every channel's floor as of now, so later cursor moves cannot shift them.
+export function snapshotFloors(cursors: Cursors, now: number, bounds: Bounds): (channelId: string) => string | null {
+  const fallback = floor(cursors, '', now, bounds)
+  const floors = new Map(cursors.channels().map(ch => [ch, floor(cursors, ch, now, bounds)]))
+  return ch => floors.get(ch) ?? fallback
+}
+
 // Unique by id, oldest first, the newest maxCount kept; the rest are dropped.
-export function select<M extends Msg>(msgs: M[], bounds: Bounds): { keep: M[]; dropped: M[] } {
-  const unique = [...new Map(msgs.map(m => [m.id, m])).values()]
+export function select<T extends { id: string }>(items: T[], maxCount: number): { keep: T[]; dropped: T[] } {
+  const unique = [...new Map(items.map(m => [m.id, m])).values()]
   unique.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1))
-  const cut = Math.max(0, unique.length - bounds.maxCount)
+  const cut = Math.max(0, unique.length - maxCount)
   return { keep: unique.slice(cut), dropped: unique.slice(0, cut) }
 }
 
 export type ReplayOptions<M extends Msg> = {
   cursors: Cursors
-  // The live delivery path; late: replayed, or held while the replay ran.
-  handle: (m: M, late: boolean) => Promise<void>
+  // The live path; late: held while the replay ran. null: the gate dropped it.
+  handle: (m: M, late: boolean) => Promise<Handed | null>
+  // Judges a missed message as the live path would; the thunk delivers it.
+  prepare: (m: M) => Promise<(() => Promise<Handed>) | null>
+  // Whether the message's channel keeps a cursor (an access group, its threads, an allowed DM).
+  inScope: (m: M) => boolean
   log: (msg: string) => void
   bounds?: Bounds
 }
 
-// Single entry for live and replayed messages: each id is handled once, and
-// its channel's cursor advances only after handle resolves.
+// Single entry for live and replayed messages: each id is handled once, and a
+// cursor advances only once the agent has the message (or the gate dropped it).
 export class Replay<M extends Msg> {
   private held: M[] | null = []
+  // Live advances wait here until the replay is taken, so a crash replays its gap again.
+  private deferred: M[] | null = null
   private claimed = new Set<string>()
   private readonly bounds: Bounds
 
@@ -134,20 +153,29 @@ export class Replay<M extends Msg> {
     return true
   }
 
+  private advance(m: M): void {
+    if (!this.o.inScope(m)) return
+    if (this.deferred) this.deferred.push(m)
+    else this.o.cursors.advance(m.channelId, m.id)
+  }
+
   private async dispatch(m: M, late: boolean): Promise<void> {
     if (!this.claim(m.id)) return
     try {
-      await this.o.handle(m, late)
-      this.o.cursors.advance(m.channelId, m.id)
+      const handed = await this.o.handle(m, late)
+      if (handed) await handed.taken
+      this.advance(m)
     } catch (err) {
       this.o.log(`replay: message ${m.id} in ${m.channelId} not delivered: ${err}`)
     }
   }
 
-  // Fetches and handles the missed messages, then releases the held live ones;
-  // live ones wait at most holdMs.
+  // Fetches, judges and delivers the missed messages, then releases the held
+  // live ones; those wait at most holdMs. Resolves once the agent has them all.
   async run(fetch: (floorOf: (channelId: string) => string | null) => Promise<M[]>, now = Date.now()): Promise<void> {
-    const work = this.catchUp(fetch, now)
+    this.deferred = []
+    const floorOf = snapshotFloors(this.o.cursors, now, this.bounds)
+    const work = this.catchUp(fetch, floorOf, now)
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<'timeout'>(r => { timer = setTimeout(() => r('timeout'), this.bounds.holdMs) })
     if ((await Promise.race([work, timeout])) === 'timeout') {
@@ -157,33 +185,64 @@ export class Replay<M extends Msg> {
     const held = this.held ?? []
     this.held = null
     for (const m of held) void this.dispatch(m, true)
-    await work
+    await (await work).settled
+    const deferred = this.deferred
+    this.deferred = null
+    for (const m of deferred) this.o.cursors.advance(m.channelId, m.id)
   }
 
-  private async catchUp(fetch: (floorOf: (channelId: string) => string | null) => Promise<M[]>, now: number): Promise<void> {
+  // Resolves once the deliveries are queued; settled once the agent took them.
+  private async catchUp(fetch: (floorOf: (channelId: string) => string | null) => Promise<M[]>, floorOf: (channelId: string) => string | null, now: number): Promise<{ settled: Promise<void> }> {
+    const done = { settled: Promise.resolve() }
     try {
       const latest = this.o.cursors.latest()
       if (latest === undefined) {
         this.o.log('replay: no last-seen state yet; nothing to replay')
-        return
+        return done
       }
       const oldest = now - this.bounds.maxAgeMs
       if (snowflakeTime(latest) < oldest) {
         this.o.log(`replay: last message seen at ${new Date(snowflakeTime(latest)).toISOString()}; messages before ${new Date(oldest).toISOString()} are not replayed`)
       }
-      const { keep, dropped } = select(await fetch(ch => floor(this.o.cursors, ch, now, this.bounds)), this.bounds)
+      const fetched = select(await fetch(floorOf), Number.MAX_SAFE_INTEGER).keep
+      const byChannel = new Map<string, M[]>()
+      for (const m of fetched) byChannel.set(m.channelId, [...(byChannel.get(m.channelId) ?? []), m])
+      const judged: { id: string; m: M; deliver: () => Promise<Handed> }[] = []
+      await Promise.all([...byChannel.values()].map(async msgs => {
+        for (const m of msgs) {
+          if (!this.claim(m.id)) continue
+          try {
+            const deliver = await this.o.prepare(m)
+            if (deliver) judged.push({ id: m.id, m, deliver })
+          } catch (err) {
+            this.o.log(`replay: message ${m.id} in ${m.channelId} not judged: ${err}`)
+          }
+        }
+      }))
+      const { keep, dropped } = select(judged, this.bounds.maxCount)
       if (dropped.length > 0) {
         this.o.log(`replay: ${dropped.length} older message(s) over the ${this.bounds.maxCount} cap not replayed: ${dropped[0]!.id}..${dropped.at(-1)!.id}`)
       }
-      this.o.log(`replay: ${keep.length} missed message(s)`)
-      const byChannel = new Map<string, M[]>()
-      for (const m of keep) byChannel.set(m.channelId, [...(byChannel.get(m.channelId) ?? []), m])
-      await Promise.all([...byChannel.values()].map(async msgs => {
-        for (const m of msgs) await this.dispatch(m, true)
-      }))
+      this.o.log(`replay: ${fetched.length} missed message(s), ${keep.length} for the agent`)
+      const taken: Promise<void>[] = []
+      for (const k of keep) {
+        try {
+          const handed = await k.deliver()
+          taken.push(handed.taken.then(() => this.o.cursors.advance(k.m.channelId, k.m.id)))
+        } catch (err) {
+          this.o.log(`replay: message ${k.id} in ${k.m.channelId} not delivered: ${err}`)
+          taken.push(Promise.reject(err))
+        }
+      }
+      // Once all are taken, each channel moves past what the gate or the cap dropped.
+      done.settled = Promise.allSettled(taken).then(results => {
+        if (results.some(r => r.status === 'rejected')) return
+        for (const m of fetched) if (this.o.inScope(m)) this.o.cursors.advance(m.channelId, m.id)
+      })
     } catch (err) {
       this.o.log(`replay failed: ${err}`)
     }
+    return done
   }
 }
 
@@ -197,39 +256,53 @@ export type Scope = {
 }
 
 type History = { id: string; isThread(): boolean; parentId?: string | null; messages: { fetch(o: { limit: number; before?: string }): Promise<Map<string, Message>> } }
+type ActiveThreads = { fetchActiveThreads(): Promise<{ threads: ReadonlyMap<string, unknown> }> }
 
 function hasHistory(ch: unknown): ch is History {
   return typeof ch === 'object' && ch !== null && 'messages' in ch && typeof (ch as { isThread?: unknown }).isThread === 'function'
 }
 
-// The group channels, their active threads and the known channels, minus the ignored ones.
+// The group channels, their active threads (one call per guild) and the known
+// channels, minus the ignored ones.
 async function scopeChannels(client: Client, scope: Scope): Promise<History[]> {
   const out = new Map<string, History>()
+  const guilds = new Map<string, ActiveThreads>()
   const add = (ch: unknown) => {
     if (!hasHistory(ch) || out.has(ch.id)) return
     if (scope.ignored(ch.id, ch.isThread() ? ch.parentId ?? null : null)) return
     out.set(ch.id, ch)
   }
-  for (const id of [...scope.groups, ...scope.known]) {
-    if (out.has(id) || scope.ignored(id, null)) continue
-    const ch = await client.channels.fetch(id).catch((err: unknown) => {
-      scope.log(`replay: channel ${id} unavailable: ${err}`)
-      return null
-    })
+  const fetchChannel = (id: string) => client.channels.fetch(id).catch((err: unknown) => {
+    scope.log(`replay: channel ${id} unavailable: ${err}`)
+    return null
+  })
+  for (const id of scope.groups) {
+    if (scope.ignored(id, null)) continue
+    const ch = await fetchChannel(id)
     add(ch)
-    if (!ch || !scope.groups.includes(id) || !('threads' in ch)) continue
+    const guild = (ch as { guild?: { id: string; channels: ActiveThreads } } | null)?.guild
+    if (guild) guilds.set(guild.id, guild.channels)
+  }
+  for (const [id, channels] of guilds) {
     try {
-      const active = await (ch.threads as { fetchActive(): Promise<{ threads: ReadonlyMap<string, unknown> }> }).fetchActive()
-      for (const t of active.threads.values()) add(t)
+      const active = await channels.fetchActiveThreads()
+      for (const t of active.threads.values()) {
+        const parentId = (t as { parentId?: string | null }).parentId
+        if (parentId && scope.groups.includes(parentId)) add(t)
+      }
     } catch (err) {
-      scope.log(`replay: threads of ${id} unavailable: ${err}`)
+      scope.log(`replay: active threads of guild ${id} unavailable: ${err}`)
     }
+  }
+  for (const id of scope.known) {
+    if (out.has(id) || scope.ignored(id, null)) continue
+    add(await fetchChannel(id))
   }
   return [...out.values()]
 }
 
-// Per channel, the newest messages after its floor, at most maxCount, not the bot's own.
-export async function fetchMissed(client: Client, scope: Scope, floorOf: (channelId: string) => string | null, maxCount = BOUNDS.maxCount): Promise<Message[]> {
+// Per channel, the newest messages after its floor, at most fetchCap, not the bot's own.
+export async function fetchMissed(client: Client, scope: Scope, floorOf: (channelId: string) => string | null, fetchCap = BOUNDS.fetchCap): Promise<Message[]> {
   const out: Message[] = []
   for (const ch of await scopeChannels(client, scope)) {
     const after = floorOf(ch.id)
@@ -250,13 +323,13 @@ export async function fetchMissed(client: Client, scope: Scope, floorOf: (channe
         if (!newer(m.id, after)) { reached = true; continue }
         if (before === undefined || newer(before, m.id)) before = m.id
         if (m.author.id === client.user?.id) continue
-        if (taken >= maxCount) { capped = true; break }
+        if (taken >= fetchCap) { capped = true; break }
         out.push(m)
         taken++
       }
       if (reached) break
     }
-    if (capped) scope.log(`replay: over ${maxCount} messages missed in ${ch.id}; older ones not replayed`)
+    if (capped) scope.log(`replay: over ${fetchCap} messages missed in ${ch.id}; older ones not read`)
   }
   return out
 }
