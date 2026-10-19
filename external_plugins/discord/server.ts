@@ -26,6 +26,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
+  DiscordAPIError,
   type Message,
   type PartialMessage,
   type MessageReaction,
@@ -593,18 +594,40 @@ mcp.setNotificationHandler(
         .setEmoji('❌')
         .setStyle(ButtonStyle.Danger),
     )
-    for (const userId of access.allowFrom) {
-      void (async () => {
-        try {
-          const user = await client.users.fetch(userId)
-          await user.send({ content: text, components: [row] })
-        } catch (e) {
-          process.stderr.write(`permission_request send to ${userId} failed: ${e}\n`)
-        }
-      })()
-    }
+    const recipients = [...access.allowFrom]
+    void Promise.allSettled(
+      recipients.map(async userId => {
+        const user = await client.users.fetch(userId)
+        await user.send({ content: text, components: [row] })
+      }),
+    ).then(results => logPermissionRelay(request_id, tool_name, recipients, results))
   },
 )
+
+// One stderr line per permission request: who got the DM and why each other send failed.
+function logPermissionRelay(
+  requestId: string,
+  toolName: string,
+  recipients: string[],
+  results: PromiseSettledResult<void>[],
+): void {
+  const sent = recipients.filter((_, i) => results[i].status === 'fulfilled')
+  const failed = recipients.flatMap((id, i) => {
+    const r = results[i]
+    return r.status === 'rejected' ? [`${id} (${describeSendError(r.reason)})`] : []
+  })
+  process.stderr.write(
+    `discord channel: permission_request ${requestId} tool=${JSON.stringify(toolName)}: ` +
+      `sent to [${sent.join(', ')}]; failed [${failed.join('; ')}]` +
+      (recipients.length === 0 ? '; allowFrom is empty' : '') + '\n',
+  )
+}
+
+// Discord's error code and message for an API error, else the error's own text.
+function describeSendError(err: unknown): string {
+  if (err instanceof DiscordAPIError) return `Discord ${err.code} HTTP ${err.status}: ${err.message}`
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+}
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
