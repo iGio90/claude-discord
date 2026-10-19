@@ -129,10 +129,11 @@ export class Replay<M extends Msg> {
   private held: M[] | null = []
   private claimed = new Set<string>()
   private readonly bounds: Bounds
-  // While the scan runs every live cursor move waits; then only those of a
-  // channel whose replayed messages are not all settled. See DESIGN.md#replay
+  // While the scan runs every cursor move waits; then only those of a channel
+  // whose replays are not all taken, or one failed. See DESIGN.md#replay
   private scanning = false
   private waiting = new Map<string, number>()
+  private failed = new Set<string>()
   private deferred = new Map<string, string>()
   // Per channel, the newest message read, reached once its replays settle.
   private reached = new Map<string, string>()
@@ -162,12 +163,16 @@ export class Replay<M extends Msg> {
 
   private advance(m: M): void {
     if (!this.o.inScope(m)) return
-    if (!this.scanning && !this.waiting.has(m.channelId)) {
+    if (!this.scanning && !this.waiting.has(m.channelId) && !this.failed.has(m.channelId)) {
       this.o.cursors.advance(m.channelId, m.id)
       return
     }
-    const cur = this.deferred.get(m.channelId)
-    if (cur === undefined || newer(m.id, cur)) this.deferred.set(m.channelId, m.id)
+    this.defer(m.channelId, m.id)
+  }
+
+  private defer(channelId: string, id: string): void {
+    const cur = this.deferred.get(channelId)
+    if (cur === undefined || newer(id, cur)) this.deferred.set(channelId, id)
   }
 
   // Moves the channel to what its replay read and what live delivery deferred.
@@ -179,15 +184,17 @@ export class Replay<M extends Msg> {
     }
   }
 
-  // One replayed message of the channel was taken, failed or was not delivered.
-  private settle(channelId: string): void {
+  // One replayed message of the channel was taken (ok) or failed; a failed
+  // one keeps its channel's cursor before it until the settle bound.
+  private settle(channelId: string, ok: boolean): void {
+    if (!ok && this.waiting.has(channelId)) this.failed.add(channelId)
     const left = (this.waiting.get(channelId) ?? 0) - 1
     if (left > 0) {
       this.waiting.set(channelId, left)
       return
     }
     if (!this.waiting.delete(channelId)) return
-    if (!this.scanning) this.release(channelId)
+    if (!this.scanning && !this.failed.has(channelId)) this.release(channelId)
     this.checkSettled()
   }
 
@@ -208,15 +215,17 @@ export class Replay<M extends Msg> {
 
   // Fetches, judges and delivers the missed messages, then releases the held
   // live ones; those wait at most holdMs. Resolves once every replayed message
-  // settled, or after settleMs, when every deferred cursor move is released.
+  // settled. After settleMs every held cursor move is forced through.
   async run(fetch: (floorOf: (channelId: string) => string | null) => Promise<M[]>, now = Date.now()): Promise<void> {
     this.scanning = true
     const settled = new Promise<void>(r => { this.onSettled = r })
     const bound = setTimeout(() => {
-      this.o.log(`replay: not settled after ${this.bounds.settleMs} ms; releasing every cursor`)
+      const unsettled = [...new Set([...this.waiting.keys(), ...this.failed])]
+      this.o.log(`replay: ${this.bounds.settleMs} ms bound reached; forcing every cursor forward${unsettled.length > 0 ? `; replayed messages not taken in ${unsettled.join(', ')} are skipped` : ''}`)
       this.scanning = false
-      for (const ch of this.waiting.keys()) this.release(ch)
+      for (const ch of new Set([...unsettled, ...this.reached.keys(), ...this.deferred.keys()])) this.release(ch)
       this.waiting.clear()
+      this.failed.clear()
       this.onSettled()
     }, this.bounds.settleMs)
     ;(bound as { unref?: () => void }).unref?.()
@@ -234,11 +243,11 @@ export class Replay<M extends Msg> {
     await work
     this.scanning = false
     for (const ch of new Set([...this.reached.keys(), ...this.deferred.keys()])) {
-      if (!this.waiting.has(ch)) this.release(ch)
+      if (!this.waiting.has(ch) && !this.failed.has(ch)) this.release(ch)
     }
     this.checkSettled()
     await settled
-    clearTimeout(bound)
+    if (this.failed.size === 0) clearTimeout(bound)
   }
 
   // Resolves once the deliveries are handed over; each settles on its own.
@@ -282,12 +291,12 @@ export class Replay<M extends Msg> {
         try {
           const handed = await k.deliver()
           void handed.taken.then(
-            () => { this.o.cursors.advance(ch, k.id); this.settle(ch) },
-            err => { this.o.log(`replay: message ${k.id} in ${ch} not taken: ${err}`); this.settle(ch) },
+            () => { this.defer(ch, k.id); this.settle(ch, true) },
+            err => { this.o.log(`replay: message ${k.id} in ${ch} not taken: ${err}`); this.settle(ch, false) },
           )
         } catch (err) {
           this.o.log(`replay: message ${k.id} in ${ch} not delivered: ${err}`)
-          this.settle(ch)
+          this.settle(ch, false)
         }
       }
     } catch (err) {

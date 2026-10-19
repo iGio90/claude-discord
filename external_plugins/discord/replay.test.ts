@@ -152,20 +152,49 @@ test('a replayed message never taken does not hold the cursor of another channel
   expect(cursors.get('1')).toBe(start)
 })
 
-test('a replayed message that fails releases its channel, without moving past it by itself', async () => {
+test('a replayed message that fails keeps its channel cursor before it', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const [start, failed, after, other] = [live(1), live(2), live(3), live(4)]
+  cursors.advance('B', start)
+  cursors.advance('A', start)
+  const replay = replayOf(cursors, { prepare: async () => async () => ({ taken: Promise.reject(new Error('session/new failed')) }) })
+  await replay.run(async () => [{ id: failed, channelId: 'B' }])
+  replay.live({ id: after, channelId: 'B' })
+  replay.live({ id: other, channelId: 'A' })
+  await tick(5)
+  expect(cursors.get('B')).toBe(start)
+  expect(cursors.get('A')).toBe(other)
+})
+
+test('a newer replayed message taken does not move the cursor past an older one that failed', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const [start, older, newer] = [live(1), live(2), live(3)]
+  cursors.advance('1', start)
+  const replay = replayOf(cursors, {
+    prepare: async m => async () => ({ taken: m.id === older ? Promise.reject(new Error('refused')) : Promise.resolve() }),
+  })
+  await replay.run(async () => [{ id: older, channelId: '1' }, { id: newer, channelId: '1' }])
+  await tick(5)
+  expect(cursors.get('1')).toBe(start)
+})
+
+test('the settle bound forces past a failed replayed message, and says so', async () => {
   const cursors = new Cursors(cursorFile(), () => {})
   const [start, failed, after] = [live(1), live(2), live(3)]
   cursors.advance('1', start)
-  let fail!: (err: Error) => void
-  const replay = replayOf(cursors, { prepare: async () => async () => ({ taken: new Promise<void>((_, r) => (fail = r)) }) })
-  const run = replay.run(async () => [{ id: failed, channelId: '1' }])
-  await tick(5)
+  const logs: string[] = []
+  const replay = replayOf(cursors, {
+    bounds: { ...BOUNDS, settleMs: 30 },
+    log: l => logs.push(l),
+    prepare: async () => async () => ({ taken: Promise.reject(new Error('refused')) }),
+  })
+  await replay.run(async () => [{ id: failed, channelId: '1' }])
   replay.live({ id: after, channelId: '1' })
   await tick(5)
   expect(cursors.get('1')).toBe(start)
-  fail(new Error('session/new failed'))
-  await run
+  await tick(40)
   expect(cursors.get('1')).toBe(after)
+  expect(logs.some(l => l.includes('are skipped'))).toBe(true)
 })
 
 test('past the settle bound every deferred cursor move is released', async () => {
@@ -183,7 +212,7 @@ test('past the settle bound every deferred cursor move is released', async () =>
   replay.live({ id: after, channelId: '1' })
   await run
   expect(cursors.get('1')).toBe(after)
-  expect(logs.some(l => l.includes('releasing every cursor'))).toBe(true)
+  expect(logs.some(l => l.includes('forcing every cursor forward'))).toBe(true)
 })
 
 test('without saved state nothing is fetched', async () => {

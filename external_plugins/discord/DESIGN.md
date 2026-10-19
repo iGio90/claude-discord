@@ -69,19 +69,27 @@ last 2,048 ids). A message posted during the replay is both fetched and
 received live; the second claim drops it. Across restarts the cursor excludes
 what was handled before.
 
-**Cursor moves during the replay.** While the scan runs, no live message
-moves a cursor: the scan does not yet know which channels have a gap. After
-it, a channel's cursor waits only while that channel has replayed messages
-the agent has not taken yet; other channels move at once. When the last of a
-channel's replayed messages is taken, or fails (the agent refused it, or a
-bridge's session could not open), the channel moves to the newest message
-read and to the newest live message that waited. A restart before that
-replays the gap again rather than skipping it: a message may arrive twice,
-never zero times. A failed replayed message is logged and not retried; the
-live messages after it move the cursor past it, as for a failed live one.
-Waiting is bounded: after 10 minutes every pending move is released with a
-log line, so an agent that never takes a message (a stuck session) cannot
-freeze the cursors for the life of the process.
+**Cursor moves during the replay.** While the scan runs, no message moves a
+cursor: the scan does not yet know which channels have a gap. After it, a
+channel's cursor waits while that channel has replayed messages the agent has
+not taken yet, including newer replayed ones already taken; other channels
+move at once. When every replayed message of a channel is taken, the channel
+moves to the newest message read and to the newest live message that waited.
+When one of them fails (the agent refused it, or a bridge's session could
+not open), the channel's cursor stays before it: nothing in that channel,
+replayed or live, moves it, so a restart replays the failed message again
+(at least once).
+
+**The settle bound is a forced release.** Ten minutes after the replay
+starts, every cursor still held is forced forward to what was read and
+delivered, with a log line naming the channels whose replayed messages were
+not taken. Without it, one message the agent never takes would hold its
+channel's cursor for the life of the process, and the next restart would
+replay up to 100 messages already received. The cost is a loss window: a
+message that failed, or that is still waiting in an agent's queue when the
+bound fires (a Codex app-server down for more than ten minutes), is skipped
+if the container restarts before the agent takes it. The log line is the
+record of that.
 
 **Not covered.** The replay runs once per process. A gateway reconnect is
 resumed by discord.js, which replays the missed events itself; a session
