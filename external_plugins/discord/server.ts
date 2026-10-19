@@ -617,10 +617,15 @@ function logPermissionRelay(
     return r.status === 'rejected' ? [`${id} (${describeSendError(r.reason)})`] : []
   })
   process.stderr.write(
-    `discord channel: permission_request ${requestId} tool=${JSON.stringify(toolName)}: ` +
-      `sent to [${sent.join(', ')}]; failed [${failed.join('; ')}]` +
+    `discord channel: permission_request ${oneLine(requestId)} tool=${JSON.stringify(toolName)}: ` +
+      `sent to [${oneLine(sent.join(', '))}]; failed [${oneLine(failed.join('; '))}]` +
       (recipients.length === 0 ? '; allowFrom is empty' : '') + '\n',
   )
+}
+
+// Replaces each line break with ' | ' so a value cannot split a log line.
+function oneLine(s: string): string {
+  return s.replace(/\r\n|\r|\n/g, ' | ')
 }
 
 // Discord's error code and message for an API error, else the error's own text.
