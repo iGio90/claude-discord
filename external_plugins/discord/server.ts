@@ -625,7 +625,7 @@ function logPermissionRelay(
 
 // Replaces each line break with ' | ' so a value cannot split a log line.
 function oneLine(s: string): string {
-  return s.replace(/\r?\n/g, ' | ')
+  return s.replace(/\r\n|\r|\n/g, ' | ')
 }
 
 // Discord's error code and message for an API error, else the error's own text.
