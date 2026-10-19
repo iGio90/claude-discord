@@ -40,6 +40,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, sep } from 'path'
+import { Cursors, Replay, fetchMissed } from './replay.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -69,6 +70,7 @@ if (!TOKEN) {
   process.exit(1)
 }
 const INBOX_DIR = join(STATE_DIR, 'inbox')
+const REPLAY_FILE = join(STATE_DIR, 'replay.json')
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
@@ -516,15 +518,18 @@ async function replyMeta(msg: Message): Promise<Record<string, string>> {
 const deliveryChains = new Map<string, Promise<void>>()
 
 // Runs deliver after the previous delivery in the same chat; other chats never wait.
-function deliverInOrder(chatId: string, deliver: () => Promise<void>): void {
+// Settles with deliver's own outcome; a failure never holds the chain.
+function deliverInOrder(chatId: string, deliver: () => Promise<void>): Promise<void> {
   const prev = deliveryChains.get(chatId) ?? Promise.resolve()
-  const done = prev.then(deliver).catch(err => {
+  const run = prev.then(deliver)
+  const done = run.catch(err => {
     process.stderr.write(`discord channel: inbound delivery failed: ${err}\n`)
   })
   deliveryChains.set(chatId, done)
   void done.finally(() => {
     if (deliveryChains.get(chatId) === done) deliveryChains.delete(chatId)
   })
+  return run
 }
 
 const mcp = new Server(
@@ -919,13 +924,25 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     .catch(() => {})
 })
 
+// Live and replayed messages share handleInbound; see DESIGN.md#replay.
+const replay = new Replay<Message>({
+  cursors: new Cursors(REPLAY_FILE, logLine),
+  handle: msg => handleInbound(msg),
+  log: logLine,
+})
+
+function logLine(line: string): void {
+  process.stderr.write(`discord channel: ${line}\n`)
+}
+
 client.on('messageCreate', msg => {
   // Patched: only ignore self-messages, allow other bots through gate()
   // See: https://github.com/anthropics/claude-plugins-official/issues/936
   if (msg.author.id === client.user?.id) return
-  handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
+  replay.live(msg)
 })
 
+// Resolves once the message is delivered to Claude or deliberately dropped.
 async function handleInbound(msg: Message): Promise<void> {
   const result = await gate(msg)
 
@@ -989,8 +1006,8 @@ async function handleInbound(msg: Message): Promise<void> {
   // The lookup starts now and settles within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
   const reply = replyMeta(msg).catch(() => ({}))
 
-  deliverInOrder(chat_id, async () => {
-    mcp.notification({
+  await deliverInOrder(chat_id, async () => {
+    await mcp.notification({
       method: 'notifications/claude/channel',
       params: {
         content,
@@ -1004,8 +1021,6 @@ async function handleInbound(msg: Message): Promise<void> {
           ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
         },
       },
-    }).catch(err => {
-      process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
     })
   })
 }
@@ -1036,7 +1051,7 @@ async function handleReaction(
     ? withTimeout(user.fetch().then(u => u.username).catch(() => null), REPLY_FETCH_TIMEOUT_MS)
     : Promise.resolve(user.username)
 
-  deliverInOrder(chat_id, async () => {
+  void deliverInOrder(chat_id, async () => {
     const [m, name] = await Promise.all([full, username])
     if (!knownOurs && m?.author.id !== client.user?.id) return
     const text = m ? replySnippet(m.content) : ''
@@ -1058,11 +1073,18 @@ async function handleReaction(
     }).catch(err => {
       process.stderr.write(`discord channel: failed to deliver reaction to Claude: ${err}\n`)
     })
-  })
+  }).catch(() => {})
 }
 
 client.once('ready', c => {
   process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
+  const access = loadAccess()
+  void replay.run(floorOf => fetchMissed(c, {
+    groups: Object.keys(access.groups),
+    ignored: (id, parentId) => isIgnoredChannel(access, id, parentId),
+    known: replay.knownChannels(),
+    log: logLine,
+  }, floorOf))
 })
 
 client.login(TOKEN).catch(err => {
