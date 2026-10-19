@@ -40,6 +40,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, sep } from 'path'
+import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -69,6 +70,7 @@ if (!TOKEN) {
   process.exit(1)
 }
 const INBOX_DIR = join(STATE_DIR, 'inbox')
+const REPLAY_FILE = join(STATE_DIR, 'replay.json')
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
@@ -256,7 +258,8 @@ function noteSent(id: string): void {
   }
 }
 
-async function gate(msg: Message): Promise<GateResult> {
+// replayed: a missed message, which never starts a pairing. See DESIGN.md#replay
+async function gate(msg: Message, replayed = false): Promise<GateResult> {
   const access = loadAccess()
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
@@ -268,7 +271,7 @@ async function gate(msg: Message): Promise<GateResult> {
 
   if (isDM) {
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
-    if (access.dmPolicy === 'allowlist') return { action: 'drop' }
+    if (replayed || access.dmPolicy === 'allowlist') return { action: 'drop' }
 
     // pairing mode — check for existing non-expired code for this sender
     for (const [code, p] of Object.entries(access.pending)) {
@@ -516,15 +519,18 @@ async function replyMeta(msg: Message): Promise<Record<string, string>> {
 const deliveryChains = new Map<string, Promise<void>>()
 
 // Runs deliver after the previous delivery in the same chat; other chats never wait.
-function deliverInOrder(chatId: string, deliver: () => Promise<void>): void {
+// Settles with deliver's own outcome; a failure never holds the chain.
+function deliverInOrder(chatId: string, deliver: () => Promise<void>): Promise<void> {
   const prev = deliveryChains.get(chatId) ?? Promise.resolve()
-  const done = prev.then(deliver).catch(err => {
+  const run = prev.then(deliver)
+  const done = run.catch(err => {
     process.stderr.write(`discord channel: inbound delivery failed: ${err}\n`)
   })
   deliveryChains.set(chatId, done)
   void done.finally(() => {
     if (deliveryChains.get(chatId) === done) deliveryChains.delete(chatId)
   })
+  return run
 }
 
 const mcp = new Server(
@@ -545,7 +551,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the message quote-replies an earlier one, the tag also has reply_to (the quoted message_id) and, when it could be resolved, reply_to_author and reply_to_text (a one-line snippet of up to 200 chars) — use them to tell what a short answer like "yes" refers to. A tag with event="reaction" means someone reacted (emoji attribute) to one of your own messages (message_id, with a reacted_text snippet): it is an acknowledgement that they read it, not a request — do not reply to it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the message quote-replies an earlier one, the tag also has reply_to (the quoted message_id) and, when it could be resolved, reply_to_author and reply_to_text (a one-line snippet of up to 200 chars) — use them to tell what a short answer like "yes" refers to. A tag with event="reaction" means someone reacted (emoji attribute) to one of your own messages (message_id, with a reacted_text snippet): it is an acknowledgement that they read it, not a request — do not reply to it. A tag with replayed="true" was posted while you were offline and arrives late (ts is when it was posted): check with fetch_messages whether someone already handled it before acting. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -837,6 +843,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
+// The replay waits for Claude Code's initialized notification. See DESIGN.md#replay
+const mcpInitialized = new Promise<void>(resolve => { mcp.oninitialized = resolve })
+const MCP_INIT_WAIT_MS = 30_000
 await mcp.connect(new StdioServerTransport())
 
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
@@ -919,17 +928,50 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     .catch(() => {})
 })
 
+// Live and replayed messages share judgeInbound; see DESIGN.md#replay.
+const replay = new Replay<Message>({
+  cursors: new Cursors(REPLAY_FILE, logLine),
+  handle: msg => handleInbound(msg),
+  prepare: async msg => {
+    const deliver = await judgeInbound(msg, true)
+    return deliver && (async () => { await deliver(); return { taken: Promise.resolve() } })
+  },
+  inScope: msg => inReplayScope(loadAccess(), msg),
+  log: logLine,
+})
+
+function logLine(line: string): void {
+  process.stderr.write(`discord channel: ${line}\n`)
+}
+
+// Channels whose cursor is kept: allowed DMs, the access groups and their threads.
+function inReplayScope(access: Access, msg: Message): boolean {
+  if (msg.channel.type === ChannelType.DM) return access.allowFrom.includes(msg.author.id)
+  const parentId = msg.channel.isThread() ? msg.channel.parentId : null
+  return !isIgnoredChannel(access, msg.channelId, parentId) && (parentId ?? msg.channelId) in access.groups
+}
+
 client.on('messageCreate', msg => {
   // Patched: only ignore self-messages, allow other bots through gate()
   // See: https://github.com/anthropics/claude-plugins-official/issues/936
   if (msg.author.id === client.user?.id) return
-  handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
+  replay.live(msg)
 })
 
-async function handleInbound(msg: Message): Promise<void> {
-  const result = await gate(msg)
+// Resolves once the message is delivered to Claude (Handed) or dropped (null).
+async function handleInbound(msg: Message): Promise<Handed | null> {
+  const deliver = await judgeInbound(msg, false)
+  if (!deliver) return null
+  await deliver()
+  return { taken: Promise.resolve() }
+}
 
-  if (result.action === 'drop') return
+// Gates the message; returns what delivers it in order, or null when it is
+// not for Claude. A replayed one gets no pairing, typing or ack, and is marked.
+async function judgeInbound(msg: Message, replayed: boolean): Promise<(() => Promise<void>) | null> {
+  const result = await gate(msg, replayed)
+
+  if (result.action === 'drop') return null
 
   if (result.action === 'pair') {
     const lead = result.isResend ? 'Still pending' : 'Pairing required'
@@ -940,7 +982,7 @@ async function handleInbound(msg: Message): Promise<void> {
     } catch (err) {
       process.stderr.write(`discord channel: failed to send pairing code: ${err}\n`)
     }
-    return
+    return null
   }
 
   const chat_id = msg.channelId
@@ -949,8 +991,10 @@ async function handleInbound(msg: Message): Promise<void> {
   // pending permission request, emit the structured event instead of
   // relaying as chat. The sender is already gate()-approved at this point
   // (non-allowlisted senders were dropped above), so we trust the reply.
+  // A replayed one answered a request of the previous session and is dropped.
   const permMatch = PERMISSION_REPLY_RE.exec(msg.content)
   if (permMatch) {
+    if (replayed) return null
     void mcp.notification({
       method: 'notifications/claude/channel/permission',
       params: {
@@ -960,18 +1004,19 @@ async function handleInbound(msg: Message): Promise<void> {
     })
     const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
     void msg.react(emoji).catch(() => {})
-    return
+    return null
   }
 
-  // Typing indicator — signals "processing" until we reply (or ~10s elapses).
-  if ('sendTyping' in msg.channel) {
-    void msg.channel.sendTyping().catch(() => {})
-  }
-
-  // Ack reaction — lets the user know we're processing. Fire-and-forget.
   const access = result.access
-  if (access.ackReaction) {
-    void msg.react(access.ackReaction).catch(() => {})
+  if (!replayed) {
+    // Typing indicator — signals "processing" until we reply (or ~10s elapses).
+    if ('sendTyping' in msg.channel) {
+      void msg.channel.sendTyping().catch(() => {})
+    }
+    // Ack reaction — lets the user know we're processing. Fire-and-forget.
+    if (access.ackReaction) {
+      void msg.react(access.ackReaction).catch(() => {})
+    }
   }
 
   // Attachments are listed (name/type/size) but not downloaded — the model
@@ -986,28 +1031,31 @@ async function handleInbound(msg: Message): Promise<void> {
   // Attachment listing goes in meta only — an in-content annotation is
   // forgeable by any allowlisted sender typing that string.
   const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
-  // The lookup starts now and settles within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
-  const reply = replyMeta(msg).catch(() => ({}))
+  // The lookup starts now (a replay's only if it survives the cap) and settles
+  // within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
+  const reply = replayed ? null : replyMeta(msg).catch(() => ({}))
 
-  deliverInOrder(chat_id, async () => {
-    mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content,
-        meta: {
-          chat_id,
-          message_id: msg.id,
-          user: msg.author.username,
-          user_id: msg.author.id,
-          ts: msg.createdAt.toISOString(),
-          ...(await reply),
-          ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+  return () => {
+    const quoted = reply ?? replyMeta(msg).catch(() => ({}))
+    return deliverInOrder(chat_id, async () => {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content,
+          meta: {
+            chat_id,
+            message_id: msg.id,
+            user: msg.author.username,
+            user_id: msg.author.id,
+            ts: msg.createdAt.toISOString(),
+            ...(replayed ? { replayed: 'true' } : {}),
+            ...(await quoted),
+            ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+          },
         },
-      },
-    }).catch(err => {
-      process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`)
+      })
     })
-  })
+  }
 }
 
 client.on('messageReactionAdd', (reaction, user) => {
@@ -1036,7 +1084,7 @@ async function handleReaction(
     ? withTimeout(user.fetch().then(u => u.username).catch(() => null), REPLY_FETCH_TIMEOUT_MS)
     : Promise.resolve(user.username)
 
-  deliverInOrder(chat_id, async () => {
+  void deliverInOrder(chat_id, async () => {
     const [m, name] = await Promise.all([full, username])
     if (!knownOurs && m?.author.id !== client.user?.id) return
     const text = m ? replySnippet(m.content) : ''
@@ -1058,11 +1106,23 @@ async function handleReaction(
     }).catch(err => {
       process.stderr.write(`discord channel: failed to deliver reaction to Claude: ${err}\n`)
     })
-  })
+  }).catch(() => {})
 }
 
-client.once('ready', c => {
+client.once('ready', async c => {
   process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
+  const initialized = await Promise.race([
+    mcpInitialized.then(() => true),
+    new Promise<false>(resolve => setTimeout(() => resolve(false), MCP_INIT_WAIT_MS)),
+  ])
+  if (!initialized) logLine(`replay: Claude Code not initialized after ${MCP_INIT_WAIT_MS} ms; starting anyway`)
+  const access = loadAccess()
+  void replay.run(floorOf => fetchMissed(c, {
+    groups: Object.keys(access.groups),
+    ignored: (id, parentId) => isIgnoredChannel(access, id, parentId),
+    known: replay.knownChannels(),
+    log: logLine,
+  }, floorOf))
 })
 
 client.login(TOKEN).catch(err => {
