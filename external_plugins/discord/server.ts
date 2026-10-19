@@ -845,6 +845,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 // The replay waits for Claude Code's initialized notification. See DESIGN.md#replay
 const mcpInitialized = new Promise<void>(resolve => { mcp.oninitialized = resolve })
+const MCP_INIT_WAIT_MS = 30_000
 await mcp.connect(new StdioServerTransport())
 
 // When Claude Code closes the MCP connection, stdin gets EOF. Without this
@@ -1030,27 +1031,31 @@ async function judgeInbound(msg: Message, replayed: boolean): Promise<(() => Pro
   // Attachment listing goes in meta only — an in-content annotation is
   // forgeable by any allowlisted sender typing that string.
   const content = msg.content || (atts.length > 0 ? '(attachment)' : '')
-  // The lookup starts now and settles within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
-  const reply = replyMeta(msg).catch(() => ({}))
+  // The lookup starts now (a replay's only if it survives the cap) and settles
+  // within REPLY_FETCH_TIMEOUT_MS; only delivery waits its turn.
+  const reply = replayed ? null : replyMeta(msg).catch(() => ({}))
 
-  return () => deliverInOrder(chat_id, async () => {
-    await mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content,
-        meta: {
-          chat_id,
-          message_id: msg.id,
-          user: msg.author.username,
-          user_id: msg.author.id,
-          ts: msg.createdAt.toISOString(),
-          ...(replayed ? { replayed: 'true' } : {}),
-          ...(await reply),
-          ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+  return () => {
+    const quoted = reply ?? replyMeta(msg).catch(() => ({}))
+    return deliverInOrder(chat_id, async () => {
+      await mcp.notification({
+        method: 'notifications/claude/channel',
+        params: {
+          content,
+          meta: {
+            chat_id,
+            message_id: msg.id,
+            user: msg.author.username,
+            user_id: msg.author.id,
+            ts: msg.createdAt.toISOString(),
+            ...(replayed ? { replayed: 'true' } : {}),
+            ...(await quoted),
+            ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+          },
         },
-      },
+      })
     })
-  })
+  }
 }
 
 client.on('messageReactionAdd', (reaction, user) => {
@@ -1106,7 +1111,11 @@ async function handleReaction(
 
 client.once('ready', async c => {
   process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
-  await mcpInitialized
+  const initialized = await Promise.race([
+    mcpInitialized.then(() => true),
+    new Promise<false>(resolve => setTimeout(() => resolve(false), MCP_INIT_WAIT_MS)),
+  ])
+  if (!initialized) logLine(`replay: Claude Code not initialized after ${MCP_INIT_WAIT_MS} ms; starting anyway`)
   const access = loadAccess()
   void replay.run(floorOf => fetchMissed(c, {
     groups: Object.keys(access.groups),

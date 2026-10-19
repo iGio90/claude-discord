@@ -137,6 +137,55 @@ test('a replay that outlasts the hold reads every floor as of its start and keep
   expect(cursors.get('2')).toBe(held)
 })
 
+test('a replayed message never taken does not hold the cursor of another channel', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const [start, stuck, a, b] = [live(1), live(2), live(3), live(4)]
+  cursors.advance('1', start)
+  cursors.advance('2', start)
+  const replay = replayOf(cursors, { prepare: async () => async () => ({ taken: new Promise<void>(() => {}) }) })
+  void replay.run(async () => [{ id: stuck, channelId: '1' }])
+  await tick(5)
+  replay.live({ id: a, channelId: '1' })
+  replay.live({ id: b, channelId: '2' })
+  await tick(5)
+  expect(cursors.get('2')).toBe(b)
+  expect(cursors.get('1')).toBe(start)
+})
+
+test('a replayed message that fails releases its channel, without moving past it by itself', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const [start, failed, after] = [live(1), live(2), live(3)]
+  cursors.advance('1', start)
+  let fail!: (err: Error) => void
+  const replay = replayOf(cursors, { prepare: async () => async () => ({ taken: new Promise<void>((_, r) => (fail = r)) }) })
+  const run = replay.run(async () => [{ id: failed, channelId: '1' }])
+  await tick(5)
+  replay.live({ id: after, channelId: '1' })
+  await tick(5)
+  expect(cursors.get('1')).toBe(start)
+  fail(new Error('session/new failed'))
+  await run
+  expect(cursors.get('1')).toBe(after)
+})
+
+test('past the settle bound every deferred cursor move is released', async () => {
+  const cursors = new Cursors(cursorFile(), () => {})
+  const [start, stuck, after] = [live(1), live(2), live(3)]
+  cursors.advance('1', start)
+  const logs: string[] = []
+  const replay = replayOf(cursors, {
+    bounds: { ...BOUNDS, settleMs: 30 },
+    log: l => logs.push(l),
+    prepare: async () => async () => ({ taken: new Promise<void>(() => {}) }),
+  })
+  const run = replay.run(async () => [{ id: stuck, channelId: '1' }])
+  await tick(5)
+  replay.live({ id: after, channelId: '1' })
+  await run
+  expect(cursors.get('1')).toBe(after)
+  expect(logs.some(l => l.includes('releasing every cursor'))).toBe(true)
+})
+
 test('without saved state nothing is fetched', async () => {
   let fetched = false
   await replayOf(new Cursors(cursorFile(), () => {})).run(async () => { fetched = true; return [] })

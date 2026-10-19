@@ -12,9 +12,10 @@ const CLAIMED_CAP = 2048
 const PAGE = 100
 
 // maxCount: messages handed to the agent, after the gate; fetchCap: messages
-// read per channel; holdMs: how long live messages wait for the replay.
-export type Bounds = { maxAgeMs: number; maxCount: number; fetchCap: number; holdMs: number }
-export const BOUNDS: Bounds = { maxAgeMs: 30 * 60_000, maxCount: 100, fetchCap: 500, holdMs: 30_000 }
+// read per channel; holdMs: how long live messages wait for the replay;
+// settleMs: how long cursor moves wait for replayed messages to be taken.
+export type Bounds = { maxAgeMs: number; maxCount: number; fetchCap: number; holdMs: number; settleMs: number }
+export const BOUNDS: Bounds = { maxAgeMs: 30 * 60_000, maxCount: 100, fetchCap: 500, holdMs: 30_000, settleMs: 10 * 60_000 }
 
 export type Msg = { id: string; channelId: string }
 
@@ -126,10 +127,16 @@ export type ReplayOptions<M extends Msg> = {
 // cursor advances only once the agent has the message (or the gate dropped it).
 export class Replay<M extends Msg> {
   private held: M[] | null = []
-  // Live advances wait here until the replay is taken, so a crash replays its gap again.
-  private deferred: M[] | null = null
   private claimed = new Set<string>()
   private readonly bounds: Bounds
+  // While the scan runs every live cursor move waits; then only those of a
+  // channel whose replayed messages are not all settled. See DESIGN.md#replay
+  private scanning = false
+  private waiting = new Map<string, number>()
+  private deferred = new Map<string, string>()
+  // Per channel, the newest message read, reached once its replays settle.
+  private reached = new Map<string, string>()
+  private onSettled: () => void = () => {}
 
   constructor(private readonly o: ReplayOptions<M>) {
     this.bounds = o.bounds ?? BOUNDS
@@ -155,8 +162,37 @@ export class Replay<M extends Msg> {
 
   private advance(m: M): void {
     if (!this.o.inScope(m)) return
-    if (this.deferred) this.deferred.push(m)
-    else this.o.cursors.advance(m.channelId, m.id)
+    if (!this.scanning && !this.waiting.has(m.channelId)) {
+      this.o.cursors.advance(m.channelId, m.id)
+      return
+    }
+    const cur = this.deferred.get(m.channelId)
+    if (cur === undefined || newer(m.id, cur)) this.deferred.set(m.channelId, m.id)
+  }
+
+  // Moves the channel to what its replay read and what live delivery deferred.
+  private release(channelId: string): void {
+    for (const pending of [this.reached, this.deferred]) {
+      const id = pending.get(channelId)
+      pending.delete(channelId)
+      if (id !== undefined) this.o.cursors.advance(channelId, id)
+    }
+  }
+
+  // One replayed message of the channel was taken, failed or was not delivered.
+  private settle(channelId: string): void {
+    const left = (this.waiting.get(channelId) ?? 0) - 1
+    if (left > 0) {
+      this.waiting.set(channelId, left)
+      return
+    }
+    if (!this.waiting.delete(channelId)) return
+    if (!this.scanning) this.release(channelId)
+    this.checkSettled()
+  }
+
+  private checkSettled(): void {
+    if (!this.scanning && this.waiting.size === 0) this.onSettled()
   }
 
   private async dispatch(m: M, late: boolean): Promise<void> {
@@ -171,9 +207,19 @@ export class Replay<M extends Msg> {
   }
 
   // Fetches, judges and delivers the missed messages, then releases the held
-  // live ones; those wait at most holdMs. Resolves once the agent has them all.
+  // live ones; those wait at most holdMs. Resolves once every replayed message
+  // settled, or after settleMs, when every deferred cursor move is released.
   async run(fetch: (floorOf: (channelId: string) => string | null) => Promise<M[]>, now = Date.now()): Promise<void> {
-    this.deferred = []
+    this.scanning = true
+    const settled = new Promise<void>(r => { this.onSettled = r })
+    const bound = setTimeout(() => {
+      this.o.log(`replay: not settled after ${this.bounds.settleMs} ms; releasing every cursor`)
+      this.scanning = false
+      for (const ch of this.waiting.keys()) this.release(ch)
+      this.waiting.clear()
+      this.onSettled()
+    }, this.bounds.settleMs)
+    ;(bound as { unref?: () => void }).unref?.()
     const floorOf = snapshotFloors(this.o.cursors, now, this.bounds)
     const work = this.catchUp(fetch, floorOf, now)
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -185,20 +231,23 @@ export class Replay<M extends Msg> {
     const held = this.held ?? []
     this.held = null
     for (const m of held) void this.dispatch(m, true)
-    await (await work).settled
-    const deferred = this.deferred
-    this.deferred = null
-    for (const m of deferred) this.o.cursors.advance(m.channelId, m.id)
+    await work
+    this.scanning = false
+    for (const ch of new Set([...this.reached.keys(), ...this.deferred.keys()])) {
+      if (!this.waiting.has(ch)) this.release(ch)
+    }
+    this.checkSettled()
+    await settled
+    clearTimeout(bound)
   }
 
-  // Resolves once the deliveries are queued; settled once the agent took them.
-  private async catchUp(fetch: (floorOf: (channelId: string) => string | null) => Promise<M[]>, floorOf: (channelId: string) => string | null, now: number): Promise<{ settled: Promise<void> }> {
-    const done = { settled: Promise.resolve() }
+  // Resolves once the deliveries are handed over; each settles on its own.
+  private async catchUp(fetch: (floorOf: (channelId: string) => string | null) => Promise<M[]>, floorOf: (channelId: string) => string | null, now: number): Promise<void> {
     try {
       const latest = this.o.cursors.latest()
       if (latest === undefined) {
         this.o.log('replay: no last-seen state yet; nothing to replay')
-        return done
+        return
       }
       const oldest = now - this.bounds.maxAgeMs
       if (snowflakeTime(latest) < oldest) {
@@ -206,7 +255,10 @@ export class Replay<M extends Msg> {
       }
       const fetched = select(await fetch(floorOf), Number.MAX_SAFE_INTEGER).keep
       const byChannel = new Map<string, M[]>()
-      for (const m of fetched) byChannel.set(m.channelId, [...(byChannel.get(m.channelId) ?? []), m])
+      for (const m of fetched) {
+        byChannel.set(m.channelId, [...(byChannel.get(m.channelId) ?? []), m])
+        if (this.o.inScope(m)) this.reached.set(m.channelId, m.id)
+      }
       const judged: { id: string; m: M; deliver: () => Promise<Handed> }[] = []
       await Promise.all([...byChannel.values()].map(async msgs => {
         for (const m of msgs) {
@@ -224,25 +276,23 @@ export class Replay<M extends Msg> {
         this.o.log(`replay: ${dropped.length} older message(s) over the ${this.bounds.maxCount} cap not replayed: ${dropped[0]!.id}..${dropped.at(-1)!.id}`)
       }
       this.o.log(`replay: ${fetched.length} missed message(s), ${keep.length} for the agent`)
-      const taken: Promise<void>[] = []
+      for (const k of keep) this.waiting.set(k.m.channelId, (this.waiting.get(k.m.channelId) ?? 0) + 1)
       for (const k of keep) {
+        const ch = k.m.channelId
         try {
           const handed = await k.deliver()
-          taken.push(handed.taken.then(() => this.o.cursors.advance(k.m.channelId, k.m.id)))
+          void handed.taken.then(
+            () => { this.o.cursors.advance(ch, k.id); this.settle(ch) },
+            err => { this.o.log(`replay: message ${k.id} in ${ch} not taken: ${err}`); this.settle(ch) },
+          )
         } catch (err) {
-          this.o.log(`replay: message ${k.id} in ${k.m.channelId} not delivered: ${err}`)
-          taken.push(Promise.reject(err))
+          this.o.log(`replay: message ${k.id} in ${ch} not delivered: ${err}`)
+          this.settle(ch)
         }
       }
-      // Once all are taken, each channel moves past what the gate or the cap dropped.
-      done.settled = Promise.allSettled(taken).then(results => {
-        if (results.some(r => r.status === 'rejected')) return
-        for (const m of fetched) if (this.o.inScope(m)) this.o.cursors.advance(m.channelId, m.id)
-      })
     } catch (err) {
       this.o.log(`replay failed: ${err}`)
     }
-    return done
   }
 }
 

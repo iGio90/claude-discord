@@ -23,9 +23,11 @@ temporary file renamed over `replay.json`.
 **When.** The replay starts once the gateway is `ready` and Claude Code has
 sent `notifications/initialized` (`mcp.oninitialized`), so no notification is
 sent before Claude Code listens. Live messages that arrive before then are
-held with the rest (below). This ordering is not covered by a test, since the
-server starts the gateway and the MCP transport at import; it shows in the
-plugin's log, where `replay: N missed message(s)` follows the connect line.
+held with the rest (below). If the initialized notification has not come
+after 30 s, the replay starts anyway with a log line, so live delivery is
+never held for good. This ordering is not covered by a test, since the server
+starts the gateway and the MCP transport at import; it shows in the plugin's
+log, where `replay: N missed message(s)` follows the connect line.
 
 **What is replayed.** Every `access.groups` channel not in `ignoreChannels`,
 the active threads under them (one guild-wide `fetchActiveThreads` call per
@@ -54,7 +56,8 @@ differences are what a stale message must not do: it never starts a pairing
 answered a request of the previous session and is dropped, and no typing
 indicator or ack reaction is shown. Its notification carries
 `replayed="true"` beside the original `ts`, and the instructions tell Claude
-to check whether someone already handled it.
+to check whether someone already handled it. A replayed message's quoted
+message is looked up only when it survives the cap.
 
 **Order.** Each channel's missed messages are judged oldest first, channels
 in parallel, then delivered in id order. Live messages that arrive during the
@@ -64,10 +67,21 @@ in arrival order, so a channel's replayed messages come before its live ones.
 **Once.** Live and replayed messages pass one claim per id per process (the
 last 2,048 ids). A message posted during the replay is both fetched and
 received live; the second claim drops it. Across restarts the cursor excludes
-what was handled before. While the replay runs, the cursor moves only with
-replayed messages; advances from live ones are applied once the agent has
-taken every replayed message. A restart in between therefore replays the gap
-again rather than skipping it: a message may arrive twice, never zero times.
+what was handled before.
+
+**Cursor moves during the replay.** While the scan runs, no live message
+moves a cursor: the scan does not yet know which channels have a gap. After
+it, a channel's cursor waits only while that channel has replayed messages
+the agent has not taken yet; other channels move at once. When the last of a
+channel's replayed messages is taken, or fails (the agent refused it, or a
+bridge's session could not open), the channel moves to the newest message
+read and to the newest live message that waited. A restart before that
+replays the gap again rather than skipping it: a message may arrive twice,
+never zero times. A failed replayed message is logged and not retried; the
+live messages after it move the cursor past it, as for a failed live one.
+Waiting is bounded: after 10 minutes every pending move is released with a
+log line, so an agent that never takes a message (a stuck session) cannot
+freeze the cursors for the life of the process.
 
 **Not covered.** The replay runs once per process. A gateway reconnect is
 resumed by discord.js, which replays the missed events itself; a session
