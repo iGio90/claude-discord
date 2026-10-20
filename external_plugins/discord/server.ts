@@ -691,7 +691,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'fetch_messages',
       description:
-        "Fetch recent messages from a Discord channel. Returns oldest-first with message IDs. Discord's search API isn't exposed to bots, so this is the only way to look back. Each row ends with its reactions as [emoji count], plus who reacted on your own messages: check there whether a message you tagged someone in was acknowledged.",
+        "Fetch recent messages from a Discord channel. Returns oldest-first with message IDs. Discord's search API isn't exposed to bots, so this is the only way to look back. Each row ends with its reactions as [emoji count], plus who reacted on your own messages.",
       inputSchema: {
         type: 'object',
         properties: {

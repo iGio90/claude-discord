@@ -165,8 +165,10 @@ The decision is in `groupgate.ts`, with its tests; `server.ts` only feeds it.
 
 ## Reactions in history
 
-With `botReactions: false` an agent is not told when another agent
-acknowledges its message, so `fetch_messages` shows them: each row ends with
+With `botReactions: false` an agent is not told when another bot reacts to
+its message, and the team's agents no longer acknowledge with reactions, but a
+developer's reaction is still part of a message, so `fetch_messages` shows
+them: each row ends with
 `[emoji count · …]` from the message itself, at no extra cost, and on our own
 messages also who reacted (`: name, name`, `…` when more reacted than listed),
 which takes one REST call per emoji. Those lookups are bounded: at most 10 per
