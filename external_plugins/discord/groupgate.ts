@@ -1,7 +1,12 @@
 // Guild-channel delivery: the channel's policy, who may post there and whether
 // a message or reaction must be addressed to the bot. See DESIGN.md#bot-messages
 export const CONTINUATION_MS = 3_000
+export const MAX_PARTS = 8
 const PARTS_CAP = 2_048
+
+// A bot's split message: the post time of its last admitted part, and how
+// many parts followed the addressed one.
+type Chain = { last: number; count: number }
 
 export type GroupPolicy = {
   requireMention: boolean
@@ -54,6 +59,11 @@ export async function isAddressed(a: Addressing, patterns?: string[]): Promise<b
   return false
 }
 
+// Whether a reactor counts as a bot; a partial user with no flag does.
+export function reactorIsBot(user: { bot?: boolean | null }): boolean {
+  return user.bot ?? true
+}
+
 // The reactor passes the channel's allowlist; a bot only when botReactions is not false.
 export function reactionAllowed(groups: Groups, r: GroupEvent): boolean {
   const policy = groupPolicy(groups, r)
@@ -61,12 +71,13 @@ export function reactionAllowed(groups: Groups, r: GroupEvent): boolean {
   return !(r.fromBot && policy.botReactions === false)
 }
 
-// Remembers each bot's last admitted message per channel, so the later parts
-// of a split message follow the first. See DESIGN.md#bot-messages
+// Remembers each bot's split message per channel, so its later parts follow
+// the addressed first one, judged in order. See DESIGN.md#bot-messages
 export class GroupGate {
-  private parts = new Map<string, number>()
+  private parts = new Map<string, Chain>()
+  private pending = new Map<string, Promise<void>>()
 
-  constructor(private readonly windowMs = CONTINUATION_MS) {}
+  constructor(private readonly windowMs = CONTINUATION_MS, private readonly maxParts = MAX_PARTS) {}
 
   // True when the message is delivered; addressed is asked only when it decides.
   async admit(groups: Groups, m: GroupMessage, addressed: () => Promise<boolean>): Promise<boolean> {
@@ -74,8 +85,29 @@ export class GroupGate {
     if (!policy || !allowed(policy, m.authorId)) return false
     if (policy.requireMention ?? true) return addressed()
     if (!m.fromBot || policy.botsRequireMention !== true) return true
-    if (!this.follows(m) && !(await addressed())) return false
-    this.note(m)
+    return this.inOrder(this.key(m), () => this.judge(m, addressed))
+  }
+
+  // Runs judge after the previous verdict for the same channel and bot.
+  private inOrder(key: string, judge: () => Promise<boolean>): Promise<boolean> {
+    const verdict = (this.pending.get(key) ?? Promise.resolve()).then(judge)
+    const tail = verdict.then(() => {}, () => {})
+    this.pending.set(key, tail)
+    void tail.then(() => {
+      if (this.pending.get(key) === tail) this.pending.delete(key)
+    })
+    return verdict
+  }
+
+  private async judge(m: GroupMessage, addressed: () => Promise<boolean>): Promise<boolean> {
+    const key = this.key(m)
+    const chain = this.parts.get(key)
+    if (chain && m.at >= chain.last && m.at - chain.last <= this.windowMs && chain.count < this.maxParts) {
+      this.put(key, { last: m.at, count: chain.count + 1 })
+      return true
+    }
+    if (!(await addressed())) return false
+    this.put(key, { last: m.at, count: 0 })
     return true
   }
 
@@ -83,15 +115,9 @@ export class GroupGate {
     return `${m.channelId}:${m.authorId}`
   }
 
-  private follows(m: GroupMessage): boolean {
-    const last = this.parts.get(this.key(m))
-    return last !== undefined && m.at >= last && m.at - last <= this.windowMs
-  }
-
-  private note(m: GroupMessage): void {
-    const key = this.key(m)
+  private put(key: string, chain: Chain): void {
     this.parts.delete(key)
-    this.parts.set(key, m.at)
+    this.parts.set(key, chain)
     if (this.parts.size > PARTS_CAP) this.parts.delete(this.parts.keys().next().value!)
   }
 }

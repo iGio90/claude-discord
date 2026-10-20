@@ -127,24 +127,46 @@ people: nothing is deleted, and the agent can read a dropped message with
 
 **Split messages.** A post longer than 2,000 characters arrives as several
 messages, and only the first carries the mention or the reply. After a bot's
-message is admitted, the next messages from the same bot in the same channel
-posted within 3 s of the last admitted part are admitted too (the Codex
-bridge's rule and its measurement, claude-builder
-`image/bridge/DESIGN.md#turn-gating`: parts arrive about 0.5 s apart). Post
-times are compared, so a replay judges them as live delivery did. The window
-is kept per channel and bot, at most 2,048 pairs, in memory.
+message is admitted as addressed, the next messages from the same bot in the
+same channel follow it while each is posted within 3 s of the part before it,
+at most 8 parts (the Codex bridge's rule and its measurement, claude-builder
+`image/bridge/DESIGN.md#turn-gating`: parts arrive about 0.5 s apart). The gap
+is measured part to part, not from the first part, because a long message
+posted 0.5 s apart would pass 3 s at its seventh part; the cap of 8 parts
+(16,000 characters after the first) bounds how long a bot that keeps posting
+stays admitted without a new tag. A part posted before the last admitted one
+does not follow it. Post times are compared, so a replay judges them as live
+delivery did. The chain is kept per channel and bot, at most 2,048 pairs, in
+memory.
+
+**In order.** The messages of one bot in one channel are judged strictly in
+arrival order: each waits for the verdict on the one before it. Without it a
+first part whose reply check needs a fetch (a reply to one of our messages
+older than the last 200 we sent) would still be pending when its second part
+is judged, and the second part, finding no chain yet, would be dropped; the
+live messages the replay held are released together and hit this at once.
+Only the bot rule waits; humans and other channels do not.
 
 **Replay.** The rule is in `gate()`, which `judgeInbound` runs for live and
 replayed messages alike, so a replayed backlog delivers only what addressed
 us; the 100-message cap counts after it.
 
 **Limits.** A post meant for every agent that tags nobody now reaches no
-agent: a bot that broadcasts must tag each agent it means. An untagged bot
-message within 3 s of the same bot's addressed one is taken as its
-continuation. A first part whose reply check needs a fetch (a reply to one of
-our messages older than the last 200 we sent) is judged concurrently with
-the parts behind it, which can then be dropped; the reader still has the
-first part and `fetch_messages`. A role mention of a role we hold, or
-`@everyone`, counts as a mention, as for `requireMention`.
+agent: a bot that broadcasts must tag each agent it means. A tag added by
+editing a post wakes nobody, since edits are not delivered; it is re-posted.
+An untagged bot message within 3 s of the same bot's addressed one is taken
+as its continuation. A role mention of a role we hold, or `@everyone`,
+counts as a mention, as for `requireMention`.
 
 The decision is in `groupgate.ts`, with its tests; `server.ts` only feeds it.
+
+## Reactions in history
+
+With `botReactions: false` an agent is not told when another agent
+acknowledges its message, so `fetch_messages` shows them: each row ends with
+`[emoji count · …]` from the message itself, at no extra cost, and on our own
+messages also who reacted (`: name, name`, `…` when more reacted than listed),
+which takes one REST call per emoji. Those lookups are bounded: at most 10 per
+call, spent on the newest of our messages first, 10 users each, each giving up
+after 1.5 s; past the budget, or on a failed lookup, the row keeps the count
+alone. `history.ts` renders the rows and is tested; `server.ts` feeds it.

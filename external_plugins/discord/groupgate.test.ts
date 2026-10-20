@@ -2,13 +2,14 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CONTINUATION_MS, GroupGate, isAddressed, reactionAllowed, type Addressing, type GroupMessage, type Groups } from './groupgate.ts'
+import { CONTINUATION_MS, GroupGate, MAX_PARTS, isAddressed, reactionAllowed, reactorIsBot, type Addressing, type GroupMessage, type Groups } from './groupgate.ts'
 import { Cursors, Replay, snowflakeAt, type Msg } from './replay.ts'
 
 const SHARED = '100'
 const HUMAN = '1'
 const BOT = '2'
 const T = 1_000_000
+const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
 const on: Groups = { [SHARED]: { requireMention: false, allowFrom: [], botsRequireMention: true, botReactions: false } }
 const off: Groups = { [SHARED]: { requireMention: false, allowFrom: [] } }
 const msg = (o: Partial<GroupMessage> = {}): GroupMessage => ({ authorId: BOT, fromBot: true, channelId: SHARED, parentId: null, at: T, ...o })
@@ -98,4 +99,70 @@ test('a replayed bot message not addressed to us is not handed to the agent', as
   })
   await replay.run(async () => ids.map(id => ({ id, channelId: SHARED })))
   expect(handed).toEqual([ids[1]!])
+})
+
+test('parts judged together wait for the first part\'s verdict', async () => {
+  const gate = new GroupGate()
+  const slowYes = async () => { await tick(20); return true }
+  const [first, second] = await Promise.all([gate.admit(on, msg(), slowYes), gate.admit(on, msg({ at: T + 500 }), no)])
+  expect([first, second]).toEqual([true, true])
+})
+
+test('a part posted before the last admitted one does not follow it', async () => {
+  const gate = new GroupGate()
+  expect(await gate.admit(on, msg(), yes)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T - 100 }), no)).toBe(false)
+})
+
+test('at most MAX_PARTS parts follow an addressed message', async () => {
+  const gate = new GroupGate()
+  expect(await gate.admit(on, msg(), yes)).toBe(true)
+  for (let i = 1; i <= MAX_PARTS; i++) expect(await gate.admit(on, msg({ at: T + i * 500 }), no)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + (MAX_PARTS + 1) * 500 }), no)).toBe(false)
+})
+
+test('a reactor without a bot flag counts as a bot', () => {
+  expect(reactorIsBot({ bot: null })).toBe(true)
+  expect(reactorIsBot({})).toBe(true)
+  expect(reactorIsBot({ bot: false })).toBe(false)
+})
+
+// A replay whose handle and prepare both go through the gate, at the given post times.
+function gatedReplay(gate: GroupGate, at: Record<string, number>, addressed: (id: string) => () => Promise<boolean>, handed: string[]) {
+  const base = BigInt(snowflakeAt(Date.now() - 60_000))
+  const cursors = new Cursors(join(mkdtempSync(join(tmpdir(), 'groupgate-')), 'replay.json'), () => {})
+  cursors.advance(SHARED, base.toString())
+  const judge = (m: Msg) => gate.admit(on, msg({ at: at[m.id]! }), addressed(m.id))
+  const replay = new Replay<Msg>({
+    cursors,
+    log: () => {},
+    inScope: () => true,
+    handle: async m => (await judge(m)) ? (handed.push(m.id), { taken: Promise.resolve() }) : null,
+    prepare: async m => (await judge(m)) ? async () => { handed.push(m.id); return { taken: Promise.resolve() } } : null,
+  })
+  return { replay, id: (n: number) => (base + BigInt(n)).toString() }
+}
+
+test('replayed parts of a split message within the window are delivered, a later one is not', async () => {
+  const handed: string[] = []
+  const at: Record<string, number> = {}
+  const { replay, id } = gatedReplay(new GroupGate(), at, i => (i === id(1) ? yes : no), handed)
+  at[id(1)] = T; at[id(2)] = T + 500; at[id(3)] = T + 500 + CONTINUATION_MS + 1
+  await replay.run(async () => [1, 2, 3].map(n => ({ id: id(n), channelId: SHARED })))
+  expect(handed).toEqual([id(1), id(2)])
+})
+
+test('two held parts released together are both delivered', async () => {
+  const handed: string[] = []
+  const at: Record<string, number> = {}
+  const slowYes = async () => { await tick(20); return true }
+  const { replay, id } = gatedReplay(new GroupGate(), at, i => (i === id(1) ? slowYes : no), handed)
+  at[id(1)] = T; at[id(2)] = T + 500
+  await replay.run(async () => {
+    replay.live({ id: id(1), channelId: SHARED })
+    replay.live({ id: id(2), channelId: SHARED })
+    return []
+  })
+  await tick(50)
+  expect(handed).toEqual([id(1), id(2)])
 })

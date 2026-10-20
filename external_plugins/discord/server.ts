@@ -41,7 +41,8 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
-import { GroupGate, isAddressed, reactionAllowed as groupReactionAllowed, type Groups } from './groupgate.ts'
+import { GroupGate, isAddressed, reactionAllowed as groupReactionAllowed, reactorIsBot, type Groups } from './groupgate.ts'
+import { MAX_REACTORS, MAX_REACTOR_LOOKUPS, emojiLabel, historyRow, type ReactionSummary } from './history.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -318,6 +319,19 @@ function reactionAllowed(access: Access, msg: Message | PartialMessage, userId: 
   const parentId = channel.isThread() ? channel.parentId : null
   if (isIgnoredChannel(access, msg.channelId, parentId)) return false
   return groupReactionAllowed(access.groups, { authorId: userId, fromBot, channelId: msg.channelId, parentId })
+}
+
+// Reactions on a fetched message; on our own, who reacted, within a per-call
+// lookup budget and REPLY_FETCH_TIMEOUT_MS. See DESIGN.md#reactions-in-history
+async function reactionsOf(m: Message, ours: boolean, budget: { left: number }): Promise<ReactionSummary[]> {
+  return Promise.all([...m.reactions.cache.values()].map(async r => {
+    const summary: ReactionSummary = { emoji: emojiLabel(r.emoji), count: r.count ?? 0 }
+    if (!ours || budget.left <= 0) return summary
+    budget.left--
+    const users = await withTimeout(r.users.fetch({ limit: MAX_REACTORS }).catch(() => null), REPLY_FETCH_TIMEOUT_MS)
+    if (users) summary.users = [...users.values()].map(u => (u.id === client.user?.id ? 'me' : u.username))
+    return summary
+  }))
 }
 
 // A mention, a reply to one of our messages (looked up when not recent), or a pattern.
@@ -677,7 +691,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'fetch_messages',
       description:
-        "Fetch recent messages from a Discord channel. Returns oldest-first with message IDs. Discord's search API isn't exposed to bots, so this is the only way to look back.",
+        "Fetch recent messages from a Discord channel. Returns oldest-first with message IDs. Discord's search API isn't exposed to bots, so this is the only way to look back. Each row ends with its reactions as [emoji count], plus who reacted on your own messages: check there whether a message you tagged someone in was acknowledged.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -754,22 +768,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const limit = Math.min((args.limit as number) ?? 20, 100)
         const msgs = await ch.messages.fetch({ limit })
         const me = client.user?.id
-        const arr = [...msgs.values()].reverse()
-        const out =
-          arr.length === 0
-            ? '(no messages)'
-            : arr
-                .map(m => {
-                  const who = m.author.id === me ? 'me' : m.author.username
-                  const atts = m.attachments.size > 0 ? ` +${m.attachments.size}att` : ''
-                  // Tool result is newline-joined; multi-line content forges
-                  // adjacent rows. History includes ungated senders (no-@mention
-                  // messages in an opted-in channel never hit the gate but
-                  // still live in channel history).
-                  const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
-                  return `[${m.createdAt.toISOString()}] ${who}: ${text}  (id: ${m.id}${atts})`
-                })
-                .join('\n')
+        const budget = { left: MAX_REACTOR_LOOKUPS }
+        // Newest first, so the reactor lookups go to the latest of our messages.
+        // History includes ungated senders: it is what the channel shows.
+        const rows = await Promise.all([...msgs.values()].map(async m => historyRow({
+          ts: m.createdAt.toISOString(),
+          who: m.author.id === me ? 'me' : m.author.username,
+          content: m.content,
+          id: m.id,
+          attachments: m.attachments.size,
+          reactions: await reactionsOf(m, m.author.id === me, budget),
+        })))
+        const out = rows.length === 0 ? '(no messages)' : rows.reverse().join('\n')
         return { content: [{ type: 'text', text: out }] }
       }
       case 'react': {
@@ -1043,13 +1053,13 @@ async function handleReaction(
 ): Promise<void> {
   const msg = reaction.message
   // Guild reactions carry the member, so bot is known; unknown counts as a bot.
-  if (!reactionAllowed(loadAccess(), msg, user.id, user.bot ?? true)) return
+  if (!reactionAllowed(loadAccess(), msg, user.id, reactorIsBot(user))) return
   const knownOurs = recentSentIds.has(msg.id) || (!msg.partial && msg.author.id === client.user?.id)
   if (!knownOurs && !msg.partial) return
 
   const chat_id = msg.channelId
   const ts = new Date().toISOString()
-  const emoji = reaction.emoji.id ? `:${reaction.emoji.name ?? reaction.emoji.id}:` : reaction.emoji.name ?? ''
+  const emoji = emojiLabel(reaction.emoji)
   const full = msg.partial
     ? withTimeout(msg.fetch().catch(() => null), REPLY_FETCH_TIMEOUT_MS)
     : Promise.resolve(msg)
