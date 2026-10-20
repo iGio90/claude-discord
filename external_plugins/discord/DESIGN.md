@@ -145,7 +145,10 @@ first part whose reply check needs a fetch (a reply to one of our messages
 older than the last 200 we sent) would still be pending when its second part
 is judged, and the second part, finding no chain yet, would be dropped; the
 live messages the replay held are released together and hit this at once.
-Only the bot rule waits; humans and other channels do not.
+Only the bot rule waits; humans and other channels do not. Because later
+parts wait, the quoted-message lookup is bounded at 1.5 s and then counts as
+not a reply to us: an unbounded `fetchReference` (discord.js retries a slow
+request; up to about a minute) would hold every later part of that bot.
 
 **Replay.** The rule is in `gate()`, which `judgeInbound` runs for live and
 replayed messages alike, so a replayed backlog delivers only what addressed
@@ -170,3 +173,9 @@ which takes one REST call per emoji. Those lookups are bounded: at most 10 per
 call, spent on the newest of our messages first, 10 users each, each giving up
 after 1.5 s; past the budget, or on a failed lookup, the row keeps the count
 alone. `history.ts` renders the rows and is tested; `server.ts` feeds it.
+
+A lookup that gives up (here, or the quoted-message lookup of the bot rule)
+only stops waiting: the request keeps running inside discord.js and still
+spends rate limit. Whether that bucket is shared with our own `react` and
+`reply` calls is unverified; Discord buckets per route, so it is likely
+separate from sends but may share the channel's message-read bucket.

@@ -166,3 +166,11 @@ test('two held parts released together are both delivered', async () => {
   await tick(50)
   expect(handed).toEqual([id(1), id(2)])
 })
+
+test('a quoted-message lookup that hangs counts as not addressed and does not hold the next part', async () => {
+  const gate = new GroupGate()
+  const hanging = () => isAddressed(addressing({ replyTo: 'm1', quotedAuthor: () => new Promise(() => {}) }), [], 20)
+  const first = gate.admit(on, msg(), hanging)
+  const second = gate.admit(on, msg({ at: T + 500 }), yes)
+  expect(await Promise.race([Promise.all([first, second]), tick(200).then(() => 'blocked')])).toEqual([false, true])
+})

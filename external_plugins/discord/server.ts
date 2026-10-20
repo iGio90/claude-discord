@@ -344,7 +344,7 @@ function isMentioned(msg: Message, extraPatterns?: string[]): Promise<boolean> {
     // Can fail if the message was deleted or we lack history perms.
     quotedAuthor: () => msg.fetchReference().then(ref => ref.author.id, () => null),
     ourId: client.user?.id,
-  }, extraPatterns)
+  }, extraPatterns, REPLY_FETCH_TIMEOUT_MS)
 }
 
 // The /discord:access skill drops a file at approved/<senderId> when it pairs

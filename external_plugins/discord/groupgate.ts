@@ -2,6 +2,7 @@
 // a message or reaction must be addressed to the bot. See DESIGN.md#bot-messages
 export const CONTINUATION_MS = 3_000
 export const MAX_PARTS = 8
+export const QUOTE_LOOKUP_MS = 1_500
 const PARTS_CAP = 2_048
 
 // A bot's split message: the post time of its last admitted part, and how
@@ -23,7 +24,8 @@ export type Groups = Record<string, GroupPolicy>
 export type GroupEvent = { authorId: string; fromBot: boolean; channelId: string; parentId: string | null }
 export type GroupMessage = GroupEvent & { at: number }
 
-// What tells whether a message is addressed to us; quotedAuthor may cost a fetch.
+// What tells whether a message is addressed to us; quotedAuthor may cost a
+// fetch and counts as unknown after lookupMs. See DESIGN.md#bot-messages
 export type Addressing = {
   mentionsUs: boolean
   replyTo?: string
@@ -44,11 +46,16 @@ function allowed(policy: GroupPolicy, authorId: string): boolean {
 }
 
 // A mention, a reply to one of our messages, or a mentionPatterns match.
-export async function isAddressed(a: Addressing, patterns?: string[]): Promise<boolean> {
+export async function isAddressed(a: Addressing, patterns?: string[], lookupMs = QUOTE_LOOKUP_MS): Promise<boolean> {
   if (a.mentionsUs) return true
   if (a.replyTo) {
     if (a.sentByUs(a.replyTo)) return true
-    const author = await a.quotedAuthor()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const author = await Promise.race([
+      a.quotedAuthor().catch(() => null),
+      new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), lookupMs) }),
+    ])
+    clearTimeout(timer)
     if (author !== null && author === a.ourId) return true
   }
   for (const pat of patterns ?? []) {
