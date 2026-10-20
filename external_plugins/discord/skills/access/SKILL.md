@@ -35,7 +35,7 @@ Arguments passed: `$ARGUMENTS`
   "dmPolicy": "pairing",
   "allowFrom": ["<senderId>", ...],
   "groups": {
-    "<channelId>": { "requireMention": true, "allowFrom": [] }
+    "<channelId>": { "requireMention": true, "allowFrom": [], "botsRequireMention": false, "botReactions": true }
   },
   "pending": {
     "<6-char-code>": {
@@ -53,6 +53,11 @@ Missing file = `{dmPolicy:"pairing", allowFrom:[], groups:{}, pending:{}}`.
 `ignoreChannels` (optional) lists channel IDs whose inbound messages and
 reactions are never delivered; a thread follows its parent. Posting to them
 still works when they are in `groups`. Preserve it on every write.
+
+`botsRequireMention` and `botReactions` (optional, per group; defaults `false`
+and `true`): with the first, a message from a bot is delivered only when it
+mentions or replies to us; with the second `false`, reactions from bots are not
+delivered. Humans are unaffected. Preserve both on every write.
 
 ---
 
@@ -100,11 +105,12 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 1. Validate `<mode>` is one of `pairing`, `allowlist`, `disabled`.
 2. Read (create default if missing), set `dmPolicy`, write.
 
-### `group add <channelId>` (optional: `--no-mention`, `--allow id1,id2`)
+### `group add <channelId>` (optional: `--no-mention`, `--allow id1,id2`, `--bots-mention`, `--no-bot-reactions`)
 
 1. Read (create default if missing).
 2. Set `groups[<channelId>] = { requireMention: !hasFlag("--no-mention"),
-   allowFrom: parsedAllowList }`.
+   allowFrom: parsedAllowList }`, plus `botsRequireMention: true` with
+   `--bots-mention` and `botReactions: false` with `--no-bot-reactions`.
 3. Write.
 
 ### `group rm <channelId>`

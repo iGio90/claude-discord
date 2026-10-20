@@ -58,6 +58,19 @@ With the default `requireMention: true`, the bot responds only when @mentioned o
 /discord:access group rm 846209781206941736
 ```
 
+## Bot messages
+
+Where several bots share a channel with `requireMention: false`, every bot post would reach every bot. Two per-channel settings keep humans heard by all while a bot is reached only by what is addressed to it:
+
+- **`botsRequireMention: true`** delivers a message from a bot (`author.bot`) only when it mentions the bot, replies to one of its messages or matches `mentionPatterns`. The later parts of a split message, from the same bot in the same channel each within 3 s of the part before, follow it, up to 8 parts after the addressed one (9 in all). Default `false`.
+- **`botReactions: false`** stops reactions from bots on the bot's own messages. Default `true`.
+
+Messages from humans are delivered as before. Threads follow their parent's entry, and replayed messages pass the same check. A dropped message is still in the channel and readable with `fetch_messages`.
+
+```
+/discord:access group add 846209781206941736 --no-mention --bots-mention --no-bot-reactions
+```
+
 ## Ignored channels
 
 `ignoreChannels` lists channel snowflakes whose messages and reactions are never delivered to Claude, whatever `groups` says. A thread is ignored when its parent channel is listed. DMs are not affected. The check runs before any fetch or reply lookup, so ignored traffic costs nothing. Outbound is unaffected: Claude can still post to an ignored channel that is in `groups`. Use it for channels Claude writes to but should not be woken by, such as an alerts or journal channel. Non-string entries are ignored.
@@ -107,7 +120,7 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
 | `/discord:access allow 184695080709324800` | Add a user snowflake directly. |
 | `/discord:access remove 184695080709324800` | Remove from the allowlist. |
 | `/discord:access policy allowlist` | Set `dmPolicy`. Values: `pairing`, `allowlist`, `disabled`. |
-| `/discord:access group add 846209781206941736` | Enable a guild channel. Flags: `--no-mention`, `--allow id1,id2`. |
+| `/discord:access group add 846209781206941736` | Enable a guild channel. Flags: `--no-mention`, `--allow id1,id2`, `--bots-mention`, `--no-bot-reactions`. |
 | `/discord:access group rm 846209781206941736` | Disable a guild channel. |
 | `/discord:access set ackReaction 🔨` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`, `ignoreChannels`. |
 
@@ -129,7 +142,11 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
       // true: respond only to @mentions and replies.
       "requireMention": true,
       // Restrict triggers to these senders. Empty = any member (subject to requireMention).
-      "allowFrom": []
+      "allowFrom": [],
+      // true: a bot's message is delivered only when it mentions or replies to us.
+      "botsRequireMention": false,
+      // false: reactions from bots are not delivered.
+      "botReactions": true
     }
   },
 
