@@ -41,6 +41,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
+import { GroupGate, isAddressed, reactionAllowed as groupReactionAllowed, type Groups } from './groupgate.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -109,16 +110,11 @@ type PendingEntry = {
   replies: number
 }
 
-type GroupPolicy = {
-  requireMention: boolean
-  allowFrom: string[]
-}
-
 type Access = {
   dmPolicy: 'pairing' | 'allowlist' | 'disabled'
   allowFrom: string[]
   /** Keyed on channel ID (snowflake), not guild ID. One entry per guild channel. */
-  groups: Record<string, GroupPolicy>
+  groups: Groups
   pending: Record<string, PendingEntry>
   mentionPatterns?: string[]
   /** Channel IDs whose messages and reactions are never delivered; threads follow their parent. Outbound is unaffected. */
@@ -248,6 +244,7 @@ type GateResult =
 // counts as a mention without needing fetchReference().
 const recentSentIds = new Set<string>()
 const RECENT_SENT_CAP = 200
+const groupGate = new GroupGate()
 
 function noteSent(id: string): void {
   recentSentIds.add(id)
@@ -302,63 +299,38 @@ async function gate(msg: Message, replayed = false): Promise<GateResult> {
   const parentId = msg.channel.isThread() ? msg.channel.parentId : null
   if (isIgnoredChannel(access, msg.channelId, parentId)) return { action: 'drop' }
 
-  // We key on channel ID (not guild ID) — simpler, and lets the user
-  // opt in per-channel rather than per-server. Threads inherit their
-  // parent channel's opt-in; the reply still goes to msg.channelId
-  // (the thread), this is only the gate lookup.
-  const channelId = msg.channel.isThread()
-    ? msg.channel.parentId ?? msg.channelId
-    : msg.channelId
-  const policy = access.groups[channelId]
-  if (!policy) return { action: 'drop' }
-  const groupAllowFrom = policy.allowFrom ?? []
-  const requireMention = policy.requireMention ?? true
-  if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
-    return { action: 'drop' }
-  }
-  if (requireMention && !(await isMentioned(msg, access.mentionPatterns))) {
-    return { action: 'drop' }
-  }
-  return { action: 'deliver', access }
+  // Keyed on channel ID, not guild ID; threads inherit their parent's entry.
+  const admitted = await groupGate.admit(
+    access.groups,
+    { authorId: senderId, fromBot: msg.author.bot, channelId: msg.channelId, parentId, at: msg.createdTimestamp },
+    () => isMentioned(msg, access.mentionPatterns),
+  )
+  return admitted ? { action: 'deliver', access } : { action: 'drop' }
 }
 
 // Reaction gate: the reactor must pass the same allowlists as a message sender.
 // A reaction on our own message stands in for the mention. No pairing.
-function reactionAllowed(access: Access, msg: Message | PartialMessage, userId: string): boolean {
+function reactionAllowed(access: Access, msg: Message | PartialMessage, userId: string, fromBot: boolean): boolean {
   if (access.dmPolicy === 'disabled') return false
   const channel = msg.channel
   if (!channel) return false
   if (channel.type === ChannelType.DM) return access.allowFrom.includes(userId)
-  if (isIgnoredChannel(access, msg.channelId, channel.isThread() ? channel.parentId : null)) return false
-  const channelId = channel.isThread() ? channel.parentId ?? msg.channelId : msg.channelId
-  const policy = access.groups[channelId]
-  if (!policy) return false
-  const groupAllowFrom = policy.allowFrom ?? []
-  return groupAllowFrom.length === 0 || groupAllowFrom.includes(userId)
+  const parentId = channel.isThread() ? channel.parentId : null
+  if (isIgnoredChannel(access, msg.channelId, parentId)) return false
+  return groupReactionAllowed(access.groups, { authorId: userId, fromBot, channelId: msg.channelId, parentId })
 }
 
-async function isMentioned(msg: Message, extraPatterns?: string[]): Promise<boolean> {
-  if (client.user && msg.mentions.has(client.user)) return true
-
-  // Reply to one of our messages counts as an implicit mention.
-  const refId = msg.reference?.messageId
-  if (refId) {
-    if (recentSentIds.has(refId)) return true
-    // Fallback: fetch the referenced message and check authorship.
+// A mention, a reply to one of our messages (looked up when not recent), or a pattern.
+function isMentioned(msg: Message, extraPatterns?: string[]): Promise<boolean> {
+  return isAddressed({
+    mentionsUs: client.user ? msg.mentions.has(client.user) : false,
+    replyTo: msg.reference?.messageId,
+    content: msg.content,
+    sentByUs: id => recentSentIds.has(id),
     // Can fail if the message was deleted or we lack history perms.
-    try {
-      const ref = await msg.fetchReference()
-      if (ref.author.id === client.user?.id) return true
-    } catch {}
-  }
-
-  const text = msg.content
-  for (const pat of extraPatterns ?? []) {
-    try {
-      if (new RegExp(pat, 'i').test(text)) return true
-    } catch {}
-  }
-  return false
+    quotedAuthor: () => msg.fetchReference().then(ref => ref.author.id, () => null),
+    ourId: client.user?.id,
+  }, extraPatterns)
 }
 
 // The /discord:access skill drops a file at approved/<senderId> when it pairs
@@ -1070,7 +1042,8 @@ async function handleReaction(
   user: User | PartialUser,
 ): Promise<void> {
   const msg = reaction.message
-  if (!reactionAllowed(loadAccess(), msg, user.id)) return
+  // Guild reactions carry the member, so bot is known; unknown counts as a bot.
+  if (!reactionAllowed(loadAccess(), msg, user.id, user.bot ?? true)) return
   const knownOurs = recentSentIds.has(msg.id) || (!msg.partial && msg.author.id === client.user?.id)
   if (!knownOurs && !msg.partial) return
 
