@@ -19,14 +19,17 @@ export type GroupPolicy = {
   botsRequireMention?: boolean
   /** Reactions from bots are delivered. Default true. */
   botReactions?: boolean
+  /** A human's message in a thread we own is delivered unaddressed. Default false. */
+  ownedThreads?: boolean
 }
 
 export type Groups = Record<string, GroupPolicy>
 
 // A guild-channel message or reaction; at is the message's post time, length its
-// content's, tagsOthers whether it tags someone but not us (see tagsOthers).
+// content's, tagsOthers whether it tags someone but not us (see tagsOthers),
+// ownerIsUs whether its thread was created by us.
 export type GroupEvent = { authorId: string; fromBot: boolean; channelId: string; parentId: string | null }
-export type GroupMessage = GroupEvent & { at: number; length: number; embedOnly: boolean; tagsOthers: boolean }
+export type GroupMessage = GroupEvent & { at: number; length: number; embedOnly: boolean; tagsOthers: boolean; ownerIsUs?: boolean }
 
 // Who may post where, as read from access.json.
 export type ChannelAccess = { groups: Groups; ignoreChannels?: string[] }
@@ -57,20 +60,23 @@ export function tagsOthers(content: string, tagsUs: boolean): boolean {
 export type MessageLike<U> = {
   author: { id: string; bot: boolean }
   channelId: string
-  channel: { isThread(): boolean; parentId?: string | null }
+  channel: { isThread(): boolean; parentId?: string | null; ownerId?: string | null }
   createdTimestamp: number
   content: string
   embeds: { length: number }
   mentions: { has(user: U, options?: { ignoreRepliedUser?: boolean }): boolean }
 }
 
-// The gate's view of a message; whether it tags us ignores the reply ping. See DESIGN.md#bot-messages
-export function groupMessageOf<U>(msg: MessageLike<U>, us: U | null): GroupMessage {
+// The gate's view of a message, for live and replayed messages alike; whether it
+// tags us ignores the reply ping. See DESIGN.md#bot-messages, DESIGN.md#owned-threads
+export function groupMessageOf<U extends { id: string }>(msg: MessageLike<NoInfer<U>>, us: U | null): GroupMessage {
   const tagsUs = us !== null && msg.mentions.has(us, { ignoreRepliedUser: true })
+  const ownerId = msg.channel.isThread() ? msg.channel.ownerId : null
   return {
     authorId: msg.author.id, fromBot: msg.author.bot, channelId: msg.channelId,
     parentId: msg.channel.isThread() ? msg.channel.parentId ?? null : null, at: msg.createdTimestamp,
     length: msg.content.length, embedOnly: embedOnly(msg.content, msg.embeds.length), tagsOthers: tagsOthers(msg.content, tagsUs),
+    ownerIsUs: us !== null && ownerId != null && ownerId === us.id,
   }
 }
 
@@ -88,6 +94,11 @@ export function groupPolicy(groups: Groups, e: { channelId: string; parentId: st
 function allowed(policy: GroupPolicy, authorId: string): boolean {
   const allowFrom = policy.allowFrom ?? []
   return allowFrom.length === 0 || allowFrom.includes(authorId)
+}
+
+// A human's message in a thread we own, under ownedThreads. See DESIGN.md#owned-threads
+function inOwnedThread(policy: GroupPolicy, m: GroupMessage): boolean {
+  return policy.ownedThreads === true && m.parentId !== null && m.ownerIsUs === true && !m.fromBot
 }
 
 // requireMention, or a bot's message under botsRequireMention.
@@ -146,6 +157,7 @@ export class GroupGate {
   async admit(groups: Groups, m: GroupMessage, addressed: () => Promise<boolean>): Promise<boolean> {
     const policy = groupPolicy(groups, m)
     if (!policy || !allowed(policy, m.authorId)) return false
+    if (inOwnedThread(policy, m)) return true
     if (!needsAddressing(policy, m)) return true
     return this.inOrder(this.key(m), () => this.judge(m, addressed))
   }

@@ -215,7 +215,8 @@ cross-repo dependency so neither test suite needs the other's checkout or the
 network. Each vector is a group policy, optional `ignoreChannels`, and steps
 (author, channel, post time `at`, whether it is addressed, `length` of the
 content, default 2,000, `tagsOthers`, default false, `replyPing`, a
-quote-reply's ping of us, default false, `embedOnly`) with the
+quote-reply's ping of us, default false, `embedOnly`, `ownerIsUs`, the
+thread is ours, default false; see [Owned threads](#owned-threads)) with the
 expected verdict; a step
 whose runtimes differ on purpose gives `{plugin, bridge}`: the bridge ignores
 `requireMention` and needs addressing on every channel message. A vector's
@@ -243,6 +244,43 @@ agent. A role mention of a role we hold, or `@everyone`,
 counts as a mention, as for `requireMention`.
 
 The decision is in `groupgate.ts`, with its tests; `server.ts` only feeds it.
+
+## Owned threads
+
+Each task is a forum post (a thread) created by its owner's bot through REST,
+and the team rules make that owner the responder for every message in the
+post that tags nobody else. Under `requireMention: true` such an untagged
+reply from a developer reached no agent: the owner saw it only by reading the
+post at its hourly check.
+
+**Rule.** Per group, opt-in. With `ownedThreads: true` on the forum's entry, a
+message whose author is not a bot, in a thread (`parentId` set) whose
+`ownerId` is our user id, is delivered without being addressed. It is checked
+after the allowlist (and `ignoreChannels`), so a denied author stays dropped,
+and before the addressing rule: such a message needs no mention, starts no
+chain, and is delivered whether or not it also tags another agent: iGio90
+(2026-10-21) wants every developer message in a post to reach its owner, which
+answers only one that tags nobody else or tags it. The check runs before
+`inOrder`, so an owned message can overtake the same author's addressed message
+still waiting on its reply lookup; it reorders, never drops, and is accepted. A bot's message there still needs addressing
+(the bot rule and its cards stand), and so does a human's message in a thread
+another bot owns; a reviewer tagged once in someone else's post receives the
+tagged message and its split parts only.
+
+**Owner.** `ownerIsUs` is computed in `groupMessageOf()`, which `gate()` runs
+for live and replayed messages alike, so a replay judges a post as the live
+path did. A thread with no `ownerId`, or a session with no user yet, counts as
+not ours: the message falls back to the addressing rule.
+
+**Live check.** That a post created by `task_create` carries the creating
+bot's id as `ownerId`, on the live path and in replay, is what the task tools
+already rely on; it is checked live at rollout, not in tests.
+
+**Bridges.** The Codex and Gemini bridges mirror the rule through the shared
+vectors (version 4): a step's `ownerIsUs` marks a post we own, and a vector's
+`options` holds bridge-only settings, such as `ownedThreads: false` for a
+bridge that keeps the rule off (Gemini, which acts only when tagged); the
+plugin ignores `options`.
 
 ## Reactions in history
 
