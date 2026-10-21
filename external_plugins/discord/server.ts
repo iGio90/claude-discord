@@ -41,7 +41,9 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
-import { GroupGate, isAddressed, reactionAllowed as groupReactionAllowed, reactorIsBot, type Groups } from './groupgate.ts'
+import { chunk } from './chunk.ts'
+import { GroupGate, groupMessageOf, isAddressed, isIgnoredChannel, reactionAllowed as groupReactionAllowed, reactorIsBot } from './groupgate.ts'
+import { defaultAccess, parseAccess, type Access } from './access.ts'
 import { MAX_REACTORS, MAX_REACTOR_LOOKUPS, emojiLabel, historyRow, type ReactionSummary } from './history.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
@@ -103,43 +105,6 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
 })
 
-type PendingEntry = {
-  senderId: string
-  chatId: string // DM channel ID — where to send the approval confirm
-  createdAt: number
-  expiresAt: number
-  replies: number
-}
-
-type Access = {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
-  allowFrom: string[]
-  /** Keyed on channel ID (snowflake), not guild ID. One entry per guild channel. */
-  groups: Groups
-  pending: Record<string, PendingEntry>
-  mentionPatterns?: string[]
-  /** Channel IDs whose messages and reactions are never delivered; threads follow their parent. Outbound is unaffected. */
-  ignoreChannels?: string[]
-  // delivery/UX config — optional, defaults live in the reply handler
-  /** Emoji to react with on receipt. Empty string disables. Unicode char or custom emoji ID. */
-  ackReaction?: string
-  /** Which chunks get Discord's reply reference when reply_to is passed. Default: 'first'. 'off' = never thread. */
-  replyToMode?: 'off' | 'first' | 'all'
-  /** Max chars per outbound message before splitting. Default: 2000 (Discord's hard cap). */
-  textChunkLimit?: number
-  /** Split on paragraph boundaries instead of hard char count. */
-  chunkMode?: 'length' | 'newline'
-}
-
-function defaultAccess(): Access {
-  return {
-    dmPolicy: 'pairing',
-    allowFrom: [],
-    groups: {},
-    pending: {},
-  }
-}
-
 const MAX_CHUNK_LIMIT = 2000
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
@@ -159,34 +124,9 @@ function assertSendable(f: string): void {
   }
 }
 
-// Keeps the string entries of an array; anything else yields [].
-function strings(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
-}
-
-// True when the channel, or a thread's parent, is in access.ignoreChannels.
-function isIgnoredChannel(access: Access, channelId: string, parentId?: string | null): boolean {
-  const ignored = access.ignoreChannels
-  if (!ignored || ignored.length === 0) return false
-  return ignored.includes(channelId) || (parentId != null && ignored.includes(parentId))
-}
-
 function readAccessFile(): Access {
   try {
-    const raw = readFileSync(ACCESS_FILE, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      mentionPatterns: parsed.mentionPatterns,
-      ignoreChannels: parsed.ignoreChannels === undefined ? undefined : strings(parsed.ignoreChannels),
-      ackReaction: parsed.ackReaction,
-      replyToMode: parsed.replyToMode,
-      textChunkLimit: parsed.textChunkLimit,
-      chunkMode: parsed.chunkMode,
-    }
+    return parseAccess(readFileSync(ACCESS_FILE, 'utf8'))
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
     try { renameSync(ACCESS_FILE, `${ACCESS_FILE}.corrupt-${Date.now()}`) } catch {}
@@ -297,15 +237,8 @@ async function gate(msg: Message, replayed = false): Promise<GateResult> {
     return { action: 'pair', code, isResend: false }
   }
 
-  const parentId = msg.channel.isThread() ? msg.channel.parentId : null
-  if (isIgnoredChannel(access, msg.channelId, parentId)) return { action: 'drop' }
-
   // Keyed on channel ID, not guild ID; threads inherit their parent's entry.
-  const admitted = await groupGate.admit(
-    access.groups,
-    { authorId: senderId, fromBot: msg.author.bot, channelId: msg.channelId, parentId, at: msg.createdTimestamp },
-    () => isMentioned(msg, access.mentionPatterns),
-  )
+  const admitted = await groupGate.admitChannel(access, groupMessageOf(msg, client.user), () => isMentioned(msg, access.mentionPatterns))
   return admitted ? { action: 'deliver', access } : { action: 'drop' }
 }
 
@@ -317,7 +250,7 @@ function reactionAllowed(access: Access, msg: Message | PartialMessage, userId: 
   if (!channel) return false
   if (channel.type === ChannelType.DM) return access.allowFrom.includes(userId)
   const parentId = channel.isThread() ? channel.parentId : null
-  if (isIgnoredChannel(access, msg.channelId, parentId)) return false
+  if (isIgnoredChannel(access.ignoreChannels, msg.channelId, parentId)) return false
   return groupReactionAllowed(access.groups, { authorId: userId, fromBot, channelId: msg.channelId, parentId })
 }
 
@@ -395,31 +328,6 @@ function checkApprovals(): void {
 }
 
 if (!STATIC) setInterval(checkApprovals, 5000).unref()
-
-// Discord caps messages at 2000 chars (hard limit — larger sends reject).
-// Split long replies, preferring paragraph boundaries when chunkMode is
-// 'newline'.
-
-function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
-  if (text.length <= limit) return [text]
-  const out: string[] = []
-  let rest = text
-  while (rest.length > limit) {
-    let cut = limit
-    if (mode === 'newline') {
-      // Prefer the last double-newline (paragraph), then single newline,
-      // then space. Fall back to hard cut.
-      const para = rest.lastIndexOf('\n\n', limit)
-      const line = rest.lastIndexOf('\n', limit)
-      const space = rest.lastIndexOf(' ', limit)
-      cut = para > limit / 2 ? para : line > limit / 2 ? line : space > 0 ? space : limit
-    }
-    out.push(rest.slice(0, cut))
-    rest = rest.slice(cut).replace(/^\n+/, '')
-  }
-  if (rest) out.push(rest)
-  return out
-}
 
 async function fetchTextChannel(id: string) {
   const ch = await client.channels.fetch(id)
@@ -930,7 +838,7 @@ function logLine(line: string): void {
 function inReplayScope(access: Access, msg: Message): boolean {
   if (msg.channel.type === ChannelType.DM) return access.allowFrom.includes(msg.author.id)
   const parentId = msg.channel.isThread() ? msg.channel.parentId : null
-  return !isIgnoredChannel(access, msg.channelId, parentId) && (parentId ?? msg.channelId) in access.groups
+  return !isIgnoredChannel(access.ignoreChannels, msg.channelId, parentId) && (parentId ?? msg.channelId) in access.groups
 }
 
 client.on('messageCreate', msg => {
@@ -1102,7 +1010,7 @@ client.once('ready', async c => {
   const access = loadAccess()
   void replay.run(floorOf => fetchMissed(c, {
     groups: Object.keys(access.groups),
-    ignored: (id, parentId) => isIgnoredChannel(access, id, parentId),
+    ignored: (id, parentId) => isIgnoredChannel(access.ignoreChannels, id, parentId),
     known: replay.knownChannels(),
     log: logLine,
   }, floorOf))

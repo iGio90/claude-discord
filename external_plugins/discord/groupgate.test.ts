@@ -1,8 +1,9 @@
-import { expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
+import { Client, MessageMentions, type User } from 'discord.js'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CONTINUATION_MS, GroupGate, MAX_PARTS, isAddressed, reactionAllowed, reactorIsBot, type Addressing, type GroupMessage, type Groups } from './groupgate.ts'
+import { CONTINUATION_MS, GroupGate, MAX_PARTS, SPLIT_FLOOR, embedOnly, groupMessageOf, isAddressed, reactionAllowed, reactorIsBot, tagsOthers, type Addressing, type GroupMessage, type Groups } from './groupgate.ts'
 import { Cursors, Replay, snowflakeAt, type Msg } from './replay.ts'
 
 const SHARED = '100'
@@ -12,7 +13,7 @@ const T = 1_000_000
 const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
 const on: Groups = { [SHARED]: { requireMention: false, allowFrom: [], botsRequireMention: true, botReactions: false } }
 const off: Groups = { [SHARED]: { requireMention: false, allowFrom: [] } }
-const msg = (o: Partial<GroupMessage> = {}): GroupMessage => ({ authorId: BOT, fromBot: true, channelId: SHARED, parentId: null, at: T, ...o })
+const msg = (o: Partial<GroupMessage> = {}): GroupMessage => ({ authorId: BOT, fromBot: true, channelId: SHARED, parentId: null, at: T, length: 2000, embedOnly: false, tagsOthers: false, ...o })
 const yes = async () => true
 const no = async () => false
 const addressing = (o: Partial<Addressing> = {}): Addressing => ({
@@ -108,6 +109,17 @@ test('parts judged together wait for the first part\'s verdict', async () => {
   expect([first, second]).toEqual([true, true])
 })
 
+test('parts held behind a slow addressed() are judged in order', async () => {
+  const gate = new GroupGate()
+  const forum: Groups = { [SHARED]: { requireMention: true, allowFrom: [] } }
+  const order: string[] = []
+  const slowYes = async () => { await tick(20); return true }
+  const first = gate.admit(forum, msg(), slowYes).then(v => { order.push('first'); return v })
+  const second = gate.admit(forum, msg({ at: T + 500 }), no).then(v => { order.push('second'); return v })
+  expect(await Promise.all([first, second])).toEqual([true, true])
+  expect(order).toEqual(['first', 'second'])
+})
+
 test('a part posted before the last admitted one does not follow it', async () => {
   const gate = new GroupGate()
   expect(await gate.admit(on, msg(), yes)).toBe(true)
@@ -173,4 +185,91 @@ test('a quoted-message lookup that hangs counts as not addressed and does not ho
   const first = gate.admit(on, msg(), hanging)
   const second = gate.admit(on, msg({ at: T + 500 }), yes)
   expect(await Promise.race([Promise.all([first, second]), tick(200).then(() => 'blocked')])).toEqual([false, true])
+})
+
+test('a message that tags someone else is never a continuation', async () => {
+  const gate = new GroupGate()
+  expect(await gate.admit(on, msg(), yes)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 500, tagsOthers: true }), no)).toBe(false)
+  expect(await gate.admit(on, msg({ at: T + 1000 }), no)).toBe(true)
+})
+
+test('a part follows only a part of split length', async () => {
+  const gate = new GroupGate()
+  expect(await gate.admit(on, msg({ length: SPLIT_FLOOR - 1 }), yes)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 500 }), no)).toBe(false)
+  expect(await gate.admit(on, msg({ at: T + 1000, length: SPLIT_FLOOR }), yes)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 1500, length: 10 }), no)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 2000 }), no)).toBe(false)
+})
+
+test('a quote-reply to us in an ignored channel or under an ignored parent is dropped unasked and starts no chain', async () => {
+  const gate = new GroupGate()
+  let asked = 0
+  const quotesUs = async () => { asked++; return true }
+  const access = { groups: on, ignoreChannels: [SHARED] }
+  expect(await gate.admitChannel(access, msg(), quotesUs)).toBe(false)
+  expect(await gate.admitChannel(access, msg({ channelId: '200', parentId: SHARED }), quotesUs)).toBe(false)
+  expect(asked).toBe(0)
+  expect(await gate.admit(on, msg({ at: T + 500 }), no)).toBe(false)
+  expect(await gate.admit(on, msg({ channelId: '200', parentId: SHARED, at: T + 500 }), no)).toBe(false)
+})
+
+test('embedOnly is content empty with embeds', () => {
+  expect(embedOnly('', 1)).toBe(true)
+  expect(embedOnly('', 0)).toBe(false)
+  expect(embedOnly('x', 1)).toBe(false)
+})
+
+test('tagsOthers sees user, role and everyone tags unless we are mentioned', () => {
+  for (const c of ['<@123> hi', '<@!123>', 'ping <@&9>', '@everyone', '@here']) expect(tagsOthers(c, false)).toBe(true)
+  expect(tagsOthers('<@123> hi', true)).toBe(false)
+  expect(tagsOthers('plain text', false)).toBe(false)
+})
+
+// ---- groupMessageOf with discord.js's own mention metadata ----------------
+
+// discord.js's own constructors, private in its types, as the gateway builds them.
+const Mentions = MessageMentions as unknown as new (...args: unknown[]) => MessageMentions
+const addUser = (c: Client, id: string, username: string) => (c.users as unknown as { _add(d: object): User })._add({ id, username, discriminator: '0000' })
+
+describe('groupMessageOf on real discord.js mentions', () => {
+  const US = '1559915578502942853'
+  const OTHER = '1559180499279155252'
+  const client = new Client({ intents: [] })
+  const us = addUser(client, US, 'us')
+  const other = addUser(client, OTHER, 'other')
+  afterAll(() => client.destroy())
+
+  // A message in channel 100 by bot "author"; users are the mentioned ones, replyTo the replied user.
+  function message(content: string, users: User[], o: { replyTo?: User; everyone?: boolean; at?: number } = {}) {
+    const mentions = new Mentions({ client, guild: null, content } as never, users as never, [], o.everyone ?? false, [], o.replyTo ?? null)
+    return { author: { id: 'author', bot: true }, channelId: '100', channel: { isThread: () => false }, createdTimestamp: o.at ?? 0, content, embeds: [], mentions }
+  }
+  const tagsOthersOf = (m: ReturnType<typeof message>) => groupMessageOf(m, us).tagsOthers
+
+  test('a reply ping alone does not tag others', () => {
+    const m = message('fixed, thanks', [us], { replyTo: us })
+    expect(m.mentions.has(us)).toBe(true)
+    expect(tagsOthersOf(m)).toBe(false)
+  })
+  test('an explicit tag of us does not tag others', () => expect(tagsOthersOf(message(`<@${US}> look`, [us]))).toBe(false))
+  test('a tag of another user with a reply ping to us tags others', () => {
+    expect(tagsOthersOf(message(`<@${OTHER}> over to you`, [us, other], { replyTo: us }))).toBe(true)
+  })
+  test('@everyone counts as tagging us; a role we cannot be shown to hold tags others', () => {
+    expect(tagsOthersOf(message('@everyone deploy', [], { everyone: true }))).toBe(false)
+    expect(tagsOthersOf(message('<@&1559200000000000000> deploy', []))).toBe(true)
+  })
+  test('a quote-reply tagging another user after seven follow-ups keeps its own second part', async () => {
+    const gate = new GroupGate()
+    const verdicts: boolean[] = []
+    for (let step = 0; step < 10; step++) {
+      const reply = step === 8
+      const content = (step === 0 ? `<@${US}> ` : reply ? `<@${OTHER}> ` : '') + 'x'.repeat(1600)
+      const m = message(content, step === 0 ? [us] : reply ? [us, other] : [], { replyTo: reply ? us : undefined, at: step * 100 })
+      verdicts.push(await gate.admitChannel({ groups: { '100': { requireMention: true, allowFrom: [] } } }, groupMessageOf(m, us), async () => step === 0 || reply))
+    }
+    expect(verdicts).toEqual(Array(10).fill(true))
+  })
 })
