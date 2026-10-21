@@ -3,11 +3,14 @@
 export const CONTINUATION_MS = 3_000
 export const MAX_PARTS = 8
 export const QUOTE_LOOKUP_MS = 1_500
+// A part shorter than this ends its message: every splitter cuts non-final parts longer.
+export const SPLIT_FLOOR = 1_000
 const PARTS_CAP = 2_048
+const TAG = /<@!?\d+>|<@&\d+>|@everyone|@here/
 
-// An author's split message: the post time of its last admitted part, and how
-// many parts followed the addressed one.
-type Chain = { last: number; count: number }
+// An author's split message: the post time and length of its last admitted
+// part, and how many parts followed the addressed one.
+type Chain = { last: number; length: number; count: number }
 
 export type GroupPolicy = {
   requireMention: boolean
@@ -20,10 +23,13 @@ export type GroupPolicy = {
 
 export type Groups = Record<string, GroupPolicy>
 
-// A guild-channel message or reaction; at is the message's post time, embedOnly
-// a message with embeds and no content.
+// A guild-channel message or reaction; at is the message's post time, length its
+// content's, tagsOthers whether it tags someone but not us (see tagsOthers).
 export type GroupEvent = { authorId: string; fromBot: boolean; channelId: string; parentId: string | null }
-export type GroupMessage = GroupEvent & { at: number; embedOnly: boolean }
+export type GroupMessage = GroupEvent & { at: number; length: number; embedOnly: boolean; tagsOthers: boolean }
+
+// Who may post where, as read from access.json.
+export type ChannelAccess = { groups: Groups; ignoreChannels?: string[] }
 
 // What tells whether a message is addressed to us; quotedAuthor may cost a
 // fetch and counts as unknown after lookupMs. See DESIGN.md#bot-messages
@@ -34,6 +40,22 @@ export type Addressing = {
   sentByUs: (id: string) => boolean
   quotedAuthor: () => Promise<string | null>
   ourId?: string
+}
+
+// A message with embeds and no content, such as a subagent card.
+export function embedOnly(content: string, embeds: number): boolean {
+  return content === '' && embeds > 0
+}
+
+// The content tags a user, a role, @everyone or @here, and we are not mentioned.
+export function tagsOthers(content: string, mentionsUs: boolean): boolean {
+  return !mentionsUs && TAG.test(content)
+}
+
+// True when the channel, or a thread's parent, is in ignoreChannels.
+export function isIgnoredChannel(ignoreChannels: string[] | undefined, channelId: string, parentId?: string | null): boolean {
+  if (!ignoreChannels || ignoreChannels.length === 0) return false
+  return ignoreChannels.includes(channelId) || (parentId != null && ignoreChannels.includes(parentId))
 }
 
 // Threads are gated by their parent channel's entry.
@@ -92,6 +114,12 @@ export class GroupGate {
 
   constructor(private readonly windowMs = CONTINUATION_MS, private readonly maxParts = MAX_PARTS) {}
 
+  // admit, behind ignoreChannels: an ignored channel or parent is dropped first.
+  async admitChannel(access: ChannelAccess, m: GroupMessage, addressed: () => Promise<boolean>): Promise<boolean> {
+    if (isIgnoredChannel(access.ignoreChannels, m.channelId, m.parentId)) return false
+    return this.admit(access.groups, m, addressed)
+  }
+
   // True when the message is delivered; addressed is asked only when it decides.
   async admit(groups: Groups, m: GroupMessage, addressed: () => Promise<boolean>): Promise<boolean> {
     const policy = groupPolicy(groups, m)
@@ -116,13 +144,19 @@ export class GroupGate {
     if (m.embedOnly) return addressed()
     const key = this.key(m)
     const chain = this.parts.get(key)
-    if (chain && m.at >= chain.last && m.at - chain.last <= this.windowMs && chain.count < this.maxParts) {
-      this.put(key, { last: m.at, count: chain.count + 1 })
+    if (chain && this.follows(chain, m)) {
+      this.put(key, { last: m.at, length: m.length, count: chain.count + 1 })
       return true
     }
     if (!(await addressed())) return false
-    this.put(key, { last: m.at, count: 0 })
+    this.put(key, { last: m.at, length: m.length, count: 0 })
     return true
+  }
+
+  // A next part: tags nobody else, after a split-length part, in the window, below the cap.
+  private follows(chain: Chain, m: GroupMessage): boolean {
+    if (m.tagsOthers || chain.length < SPLIT_FLOOR) return false
+    return m.at >= chain.last && m.at - chain.last <= this.windowMs && chain.count < this.maxParts
   }
 
   private key(m: GroupMessage): string {

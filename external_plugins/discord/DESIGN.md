@@ -154,7 +154,23 @@ delivery did, and a chain expires only against its own author's next
 message, never against another author's later post. The chain is kept per
 channel and author, at most 2,048 pairs (oldest evicted), in memory. The
 allowlist is checked first: a denied author is dropped, addressed or not,
-without the quoted-message lookup, and starts no chain.
+without the quoted-message lookup, and starts no chain; so is any message in
+an ignored channel or a thread under one (`GroupGate.admitChannel`).
+
+Only a message that can be a split part follows. A part follows only when
+the part before it was at least 1,000 characters (`SPLIT_FLOOR`, half of
+Discord's 2,000 limit): `chunk()` here and the bridges' `format.ts` cut every
+part but the last above half the limit, in length mode at the limit and in
+newline mode at the last paragraph, line or space past the half (until
+0.0.11 the space fallback took any space, so a part could be one word). A
+short part therefore ends its chain, and a message that tags a user, a role,
+`@everyone` or `@here` without mentioning us (`tagsOthers()`, read from the
+content) never follows: posts put their tags at the start, so such a
+message is a new one for someone else (the cost: a later part that tags
+another agent again is lost to us). Without these, any message by the
+same author within 3 s followed, so "@B check X" then "@G deploy Y" a second
+later woke B for both, against the one-responder rule. The chain keeps the
+length of its last admitted part.
 
 **Embed-only messages.** A message with embeds and no content (a subagent
 card, a status embed) never continues a chain and never starts one; on a path
@@ -165,7 +181,8 @@ treating one as a part would wake the tagged agent for every card, and
 letting it start a chain would admit the bot's next untagged text. It does
 not break a chain either: the next text part is judged against the last
 admitted part. Groups that deliver bot messages unaddressed keep delivering
-cards. `server.ts` sets `embedOnly` from `content === ''` and `embeds`.
+cards. `embedOnly()` in `groupgate.ts` is the test (`content === ''` with
+embeds); the bridges mirror it.
 
 **In order.** The messages of one author in one channel that need addressing
 are judged strictly in arrival order: each waits for the verdict on the one
@@ -184,14 +201,17 @@ an adapted copy of this rule (`image/bridge/turngate.ts`), so the behaviour
 is kept as sequence vectors in `testdata/gate-vectors.json`, of which
 claude-builder `image/bridge/testdata/` holds a byte copy, chosen over a
 cross-repo dependency so neither test suite needs the other's checkout or the
-network. Each vector is a group policy and steps (author, channel, post time
-`at`, whether it is addressed, `embedOnly`) with the expected verdict; a step
+network. Each vector is a group policy, optional `ignoreChannels`, and steps
+(author, channel, post time `at`, whether it is addressed, `length` of the
+content, default 2,000, `tagsOthers`, default false, `embedOnly`) with the
+expected verdict; a step
 whose runtimes differ on purpose gives `{plugin, bridge}`: the bridge ignores
 `requireMention` and needs addressing on every channel message. A vector's
 group is the access entry of every channel its steps are gated by (a step's
 `parent`, else its `channel`), read through `parseAccess` (`access.ts`, the
 loader `server.ts` uses), so a thread step finds the entry only through its
-parent. Runners also check that a denied author is never asked whether it
+parent. Runners also check, against the entry each step is gated by, that a
+denied author, or a message in an ignored channel, is never asked whether it
 is addressed. A change to the behaviour bumps `version` here and in the copy
 in the same pair of commits.
 
@@ -202,8 +222,12 @@ us; the 100-message cap counts after it.
 **Limits.** A post meant for every agent that tags nobody now reaches no
 agent: a bot that broadcasts must tag each agent it means. A tag added by
 editing a post wakes nobody, since edits are not delivered; it is re-posted.
-An untagged message within 3 s of the same author's addressed one is taken
-as its continuation. A role mention of a role we hold, or `@everyone`,
+A message within 3 s of the same author's addressed one of at least 1,000
+characters, tagging nobody else, is taken as its continuation. An agent
+with `textChunkLimit` below 2,000 sends parts under the floor, so their later
+parts are dropped; and a part whose content holds tag syntax (`<@id>`, say in
+a code block) ends its chain. Both drop a part rather than wake the wrong
+agent. A role mention of a role we hold, or `@everyone`,
 counts as a mention, as for `requireMention`.
 
 The decision is in `groupgate.ts`, with its tests; `server.ts` only feeds it.

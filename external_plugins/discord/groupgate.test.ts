@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CONTINUATION_MS, GroupGate, MAX_PARTS, isAddressed, reactionAllowed, reactorIsBot, type Addressing, type GroupMessage, type Groups } from './groupgate.ts'
+import { CONTINUATION_MS, GroupGate, MAX_PARTS, SPLIT_FLOOR, embedOnly, isAddressed, reactionAllowed, reactorIsBot, tagsOthers, type Addressing, type GroupMessage, type Groups } from './groupgate.ts'
 import { Cursors, Replay, snowflakeAt, type Msg } from './replay.ts'
 
 const SHARED = '100'
@@ -12,7 +12,7 @@ const T = 1_000_000
 const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
 const on: Groups = { [SHARED]: { requireMention: false, allowFrom: [], botsRequireMention: true, botReactions: false } }
 const off: Groups = { [SHARED]: { requireMention: false, allowFrom: [] } }
-const msg = (o: Partial<GroupMessage> = {}): GroupMessage => ({ authorId: BOT, fromBot: true, channelId: SHARED, parentId: null, at: T, embedOnly: false, ...o })
+const msg = (o: Partial<GroupMessage> = {}): GroupMessage => ({ authorId: BOT, fromBot: true, channelId: SHARED, parentId: null, at: T, length: 2000, embedOnly: false, tagsOthers: false, ...o })
 const yes = async () => true
 const no = async () => false
 const addressing = (o: Partial<Addressing> = {}): Addressing => ({
@@ -184,4 +184,44 @@ test('a quoted-message lookup that hangs counts as not addressed and does not ho
   const first = gate.admit(on, msg(), hanging)
   const second = gate.admit(on, msg({ at: T + 500 }), yes)
   expect(await Promise.race([Promise.all([first, second]), tick(200).then(() => 'blocked')])).toEqual([false, true])
+})
+
+test('a message that tags someone else is never a continuation', async () => {
+  const gate = new GroupGate()
+  expect(await gate.admit(on, msg(), yes)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 500, tagsOthers: true }), no)).toBe(false)
+  expect(await gate.admit(on, msg({ at: T + 1000 }), no)).toBe(true)
+})
+
+test('a part follows only a part of split length', async () => {
+  const gate = new GroupGate()
+  expect(await gate.admit(on, msg({ length: SPLIT_FLOOR - 1 }), yes)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 500 }), no)).toBe(false)
+  expect(await gate.admit(on, msg({ at: T + 1000, length: SPLIT_FLOOR }), yes)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 1500, length: 10 }), no)).toBe(true)
+  expect(await gate.admit(on, msg({ at: T + 2000 }), no)).toBe(false)
+})
+
+test('a quote-reply to us in an ignored channel or under an ignored parent is dropped unasked and starts no chain', async () => {
+  const gate = new GroupGate()
+  let asked = 0
+  const quotesUs = async () => { asked++; return true }
+  const access = { groups: on, ignoreChannels: [SHARED] }
+  expect(await gate.admitChannel(access, msg(), quotesUs)).toBe(false)
+  expect(await gate.admitChannel(access, msg({ channelId: '200', parentId: SHARED }), quotesUs)).toBe(false)
+  expect(asked).toBe(0)
+  expect(await gate.admit(on, msg({ at: T + 500 }), no)).toBe(false)
+  expect(await gate.admit(on, msg({ channelId: '200', parentId: SHARED, at: T + 500 }), no)).toBe(false)
+})
+
+test('embedOnly is content empty with embeds', () => {
+  expect(embedOnly('', 1)).toBe(true)
+  expect(embedOnly('', 0)).toBe(false)
+  expect(embedOnly('x', 1)).toBe(false)
+})
+
+test('tagsOthers sees user, role and everyone tags unless we are mentioned', () => {
+  for (const c of ['<@123> hi', '<@!123>', 'ping <@&9>', '@everyone', '@here']) expect(tagsOthers(c, false)).toBe(true)
+  expect(tagsOthers('<@123> hi', true)).toBe(false)
+  expect(tagsOthers('plain text', false)).toBe(false)
 })

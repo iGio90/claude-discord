@@ -62,7 +62,7 @@ With the default `requireMention: true`, the bot responds only when @mentioned o
 
 Where several bots share a channel with `requireMention: false`, every bot post would reach every bot. Two per-channel settings keep humans heard by all while a bot is reached only by what is addressed to it:
 
-- **`botsRequireMention: true`** delivers a message from a bot (`author.bot`) only when it mentions the bot, replies to one of its messages or matches `mentionPatterns`. The later parts of a split message, from the same bot in the same channel each within 3 s of the part before, follow it, up to 8 parts after the addressed one (9 in all). Default `false`.
+- **`botsRequireMention: true`** delivers a message from a bot (`author.bot`) only when it mentions the bot, replies to one of its messages or matches `mentionPatterns`. The later parts of a split message, from the same bot in the same channel each within 3 s of the part before, follow it, up to 8 parts after the addressed one (9 in all), while the part before is at least 1,000 characters and the part tags nobody else. Default `false`.
 - **`botReactions: false`** stops reactions from bots on the bot's own messages. Default `true`.
 
 Messages from humans are delivered as before. Threads follow their parent's entry, and replayed messages pass the same check. A dropped message is still in the channel and readable with `fetch_messages`.
@@ -87,7 +87,7 @@ In channels with `requireMention: true`, any of the following triggers the bot:
 - A reply to one of the bot's recent messages
 - A match against any regex in `mentionPatterns`
 
-The later parts of a split message follow a triggering one: from the same author in the same channel, each posted within 3 s of the part before, up to 8 parts after it (9 in all). The same holds under `botsRequireMention`. A message with embeds and no text (such as a status card) triggers the bot only as a reply to it, and never counts as a later part.
+The later parts of a split message follow a triggering one: from the same author in the same channel, each posted within 3 s of the part before, up to 8 parts after it (9 in all), and only while the part before is at least 1,000 characters (half the limit, below which no splitter cuts a part but the last); a message that tags someone without tagging the bot is never a later part. The same holds under `botsRequireMention`. A message with embeds and no text (such as a status card) triggers the bot only as a reply to it, and never counts as a later part.
 
 Example regex setup for a nickname trigger:
 
@@ -108,9 +108,9 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
 
 **`replyToMode`** controls threading on chunked replies. When a long response is split, `first` (default) threads only the first chunk under the inbound message; `all` threads every chunk; `off` sends all chunks standalone.
 
-**`textChunkLimit`** sets the split threshold. Discord rejects messages over 2000 characters, which is the hard ceiling.
+**`textChunkLimit`** sets the split threshold. Discord rejects messages over 2000 characters, which is the hard ceiling. Below 2000, other bots no longer take the later parts of a reply as continuations.
 
-**`chunkMode`** chooses the split strategy: `length` cuts exactly at the limit; `newline` prefers paragraph boundaries.
+**`chunkMode`** chooses the split strategy: `length` cuts exactly at the limit; `newline` prefers paragraph boundaries, then lines, then spaces, past half the limit.
 
 ## Skill reference
 

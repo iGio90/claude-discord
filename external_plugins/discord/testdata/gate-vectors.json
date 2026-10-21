@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "vectors": [
     {"name":"a tagged two-part bot message is delivered whole under requireMention","group":{"requireMention":true,"allowFrom":[]}, "steps": [
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
@@ -126,6 +126,28 @@
       {"author":"3","fromBot":true,"channel":"200","parent":"100","addressed":true,"at":1000,"expect":false},
       {"author":"1","fromBot":false,"channel":"200","parent":"100","addressed":true,"at":1000,"expect":true},
       {"author":"1","fromBot":false,"channel":"200","parent":"100","addressed":false,"at":1500,"expect":true}
+    ]},
+    {"name":"a tag for someone else right after a short tagged message is not its continuation","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":true,"at":1000,"length":12,"expect":true},
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":false,"at":2000,"length":12,"tagsOthers":true,"expect":false}
+    ]},
+    {"name":"a message that tags someone else never continues a chain, even after a full part","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"length":2000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"length":2000,"tagsOthers":true,"expect":false},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"length":2000,"expect":true}
+    ]},
+    {"name":"a part after a part shorter than 1,000 characters is not a continuation","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"length":999,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"length":2000,"expect":false}
+    ]},
+    {"name":"a part after a 1,000-character part follows it, and the short last part ends the chain","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"length":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"length":300,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"length":2000,"expect":false}
+    ]},
+    {"name":"a quote-reply to us in an ignored channel or under an ignored parent is dropped without a lookup","group":{"requireMention":true,"allowFrom":[]},"ignoreChannels":["100"], "steps": [
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":false},
+      {"author":"2","fromBot":true,"channel":"200","parent":"100","addressed":true,"at":1000,"expect":false}
     ]}
   ]
 }
