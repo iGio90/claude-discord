@@ -261,6 +261,14 @@ describe('groupMessageOf on real discord.js mentions', () => {
     expect(tagsOthersOf(message('@everyone deploy', [], { everyone: true }))).toBe(false)
     expect(tagsOthersOf(message('<@&1559200000000000000> deploy', []))).toBe(true)
   })
+  // The message in thread 200 under forum 100, owned by ownerId when given.
+  const inThread = (ownerId?: string) => ({ ...message('hi', []), channel: { isThread: () => true, parentId: '100', ownerId } })
+  test('ownerIsUs is true in a thread we own', () => expect(groupMessageOf(inThread(US), us).ownerIsUs).toBe(true))
+  test('ownerIsUs is false in a thread another user owns', () => expect(groupMessageOf(inThread(OTHER), us).ownerIsUs).toBe(false))
+  test('ownerIsUs is false when the thread has no ownerId', () => {
+    expect(groupMessageOf(inThread(), us).ownerIsUs).toBe(false)
+    expect(groupMessageOf(inThread(), null).ownerIsUs).toBe(false)
+  })
   test('a quote-reply tagging another user after seven follow-ups keeps its own second part', async () => {
     const gate = new GroupGate()
     const verdicts: boolean[] = []

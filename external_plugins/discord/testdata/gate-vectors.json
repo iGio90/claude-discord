@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "vectors": [
     {"name":"a tagged two-part bot message is delivered whole under requireMention","group":{"requireMention":true,"allowFrom":[]}, "steps": [
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
@@ -172,6 +172,43 @@
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1700,"length":1600,"expect":true},
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1800,"length":1600,"replyPing":true,"expect":true},
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1900,"length":1600,"expect":false}
+    ]},
+    {"name":"our own forum post: an untagged human message is delivered","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":true,"addressed":false,"at":1000,"expect":true}
+    ]},
+    {"name":"another bot's forum post: an untagged human message is dropped","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":false,"addressed":false,"at":1000,"expect":false}
+    ]},
+    {"name":"our own forum post: an untagged bot message is dropped","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"200","parent":"100","ownerIsUs":true,"addressed":false,"at":1000,"expect":false}
+    ]},
+    {"name":"another bot's forum post: a human message addressed to us and its untagged next part within 3 s are delivered","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":false,"addressed":true,"at":1000,"expect":true},
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":false,"addressed":false,"at":3000,"expect":true}
+    ]},
+    {"name":"another bot's forum post: a reviewer tagged once does not get the human's untagged message 5 s later","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":false,"addressed":true,"at":1000,"length":40,"expect":true},
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":false,"addressed":false,"at":6000,"expect":false}
+    ]},
+    {"name":"a bridge with ownedThreads off (Gemini) drops an untagged human message in its own forum post","runtimes":["bridge"],"options":{"ownedThreads":false},"group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":true,"addressed":false,"at":1000,"expect":false}
+    ]},
+    {"name":"without the bridge option an untagged human message in our own forum post is delivered in both runtimes","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":true,"addressed":false,"at":1000,"expect":true}
+    ]},
+    {"name":"a group without ownedThreads drops an untagged human message in our own forum post","group":{"requireMention":true,"botsRequireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","ownerIsUs":true,"addressed":false,"at":1000,"expect":false}
+    ]},
+    {"name":"our own forum post: a denied author's untagged message is dropped","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":["1"]}, "steps": [
+      {"author":"9","fromBot":false,"channel":"200","parent":"100","ownerIsUs":true,"addressed":false,"at":1000,"expect":false}
+    ]},
+    {"name":"our own forum post: a bot's card 1 s after its tag of us is dropped","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"200","parent":"100","ownerIsUs":true,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"200","parent":"100","ownerIsUs":true,"addressed":false,"at":2000,"embedOnly":true,"expect":false}
+    ]},
+    {"name":"a bot's tag of the post's owner and its card 1 s later are dropped for every other agent","group":{"requireMention":true,"botsRequireMention":true,"ownedThreads":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"200","parent":"100","ownerIsUs":false,"addressed":false,"at":1000,"tagsOthers":true,"expect":false},
+      {"author":"2","fromBot":true,"channel":"200","parent":"100","ownerIsUs":false,"addressed":false,"at":2000,"embedOnly":true,"expect":false}
     ]}
   ]
 }

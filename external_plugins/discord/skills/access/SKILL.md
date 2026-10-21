@@ -35,7 +35,7 @@ Arguments passed: `$ARGUMENTS`
   "dmPolicy": "pairing",
   "allowFrom": ["<senderId>", ...],
   "groups": {
-    "<channelId>": { "requireMention": true, "allowFrom": [], "botsRequireMention": false, "botReactions": true }
+    "<channelId>": { "requireMention": true, "allowFrom": [], "botsRequireMention": false, "botReactions": true, "ownedThreads": false }
   },
   "pending": {
     "<6-char-code>": {
@@ -58,6 +58,10 @@ still works when they are in `groups`. Preserve it on every write.
 and `true`): with the first, a message from a bot is delivered only when it
 mentions or replies to us; with the second `false`, reactions from bots are not
 delivered. Humans are unaffected. Preserve both on every write.
+
+`ownedThreads` (optional, per group; default `false`): a human's message in a
+thread the bot created under that channel is delivered without a mention.
+Preserve it on every write.
 
 ---
 
@@ -105,12 +109,13 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 1. Validate `<mode>` is one of `pairing`, `allowlist`, `disabled`.
 2. Read (create default if missing), set `dmPolicy`, write.
 
-### `group add <channelId>` (optional: `--no-mention`, `--allow id1,id2`, `--bots-mention`, `--no-bot-reactions`)
+### `group add <channelId>` (optional: `--no-mention`, `--allow id1,id2`, `--bots-mention`, `--no-bot-reactions`, `--owned-threads`)
 
 1. Read (create default if missing).
 2. Set `groups[<channelId>] = { requireMention: !hasFlag("--no-mention"),
    allowFrom: parsedAllowList }`, plus `botsRequireMention: true` with
-   `--bots-mention` and `botReactions: false` with `--no-bot-reactions`.
+   `--bots-mention`, `botReactions: false` with `--no-bot-reactions` and
+   `ownedThreads: true` with `--owned-threads`.
 3. Write.
 
 ### `group rm <channelId>`

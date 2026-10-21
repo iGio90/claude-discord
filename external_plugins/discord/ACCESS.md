@@ -71,6 +71,14 @@ Messages from humans are delivered as before. Threads follow their parent's entr
 /discord:access group add 846209781206941736 --no-mention --bots-mention --no-bot-reactions
 ```
 
+## Owned threads
+
+In a forum where each task is a post (a thread) created by one bot, people reply in that post without tagging its bot. With **`ownedThreads: true`** on the forum's entry, a message from a human (not `author.bot`) in a thread this bot created is delivered without a mention, before `requireMention` and `botsRequireMention` are applied. The allowlist still applies first. A bot's message there, and a human's message in a thread another bot created, still need addressing. Default `false`.
+
+```
+/discord:access group add 1562371076154200124 --owned-threads
+```
+
 ## Ignored channels
 
 `ignoreChannels` lists channel snowflakes whose messages and reactions are never delivered to Claude, whatever `groups` says. A thread is ignored when its parent channel is listed. DMs are not affected. The check runs before any fetch or reply lookup, so ignored traffic costs nothing. Outbound is unaffected: Claude can still post to an ignored channel that is in `groups`. Use it for channels Claude writes to but should not be woken by, such as an alerts or journal channel. Non-string entries are ignored.
@@ -122,7 +130,7 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
 | `/discord:access allow 184695080709324800` | Add a user snowflake directly. |
 | `/discord:access remove 184695080709324800` | Remove from the allowlist. |
 | `/discord:access policy allowlist` | Set `dmPolicy`. Values: `pairing`, `allowlist`, `disabled`. |
-| `/discord:access group add 846209781206941736` | Enable a guild channel. Flags: `--no-mention`, `--allow id1,id2`, `--bots-mention`, `--no-bot-reactions`. |
+| `/discord:access group add 846209781206941736` | Enable a guild channel. Flags: `--no-mention`, `--allow id1,id2`, `--bots-mention`, `--no-bot-reactions`, `--owned-threads`. |
 | `/discord:access group rm 846209781206941736` | Disable a guild channel. |
 | `/discord:access set ackReaction 🔨` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`, `ignoreChannels`. |
 
@@ -148,7 +156,9 @@ Configure outbound behavior with `/discord:access set <key> <value>`.
       // true: a bot's message is delivered only when it mentions or replies to us.
       "botsRequireMention": false,
       // false: reactions from bots are not delivered.
-      "botReactions": true
+      "botReactions": true,
+      // true: a human's message in a thread this bot created is delivered unaddressed.
+      "ownedThreads": false
     }
   },
 

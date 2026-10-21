@@ -8,9 +8,10 @@ import { GroupGate, groupMessageOf, groupPolicy, isIgnoredChannel } from './grou
 type Verdict = boolean | { plugin: boolean; bridge: boolean }
 type Step = {
   author: string; fromBot: boolean; channel: string; parent: string | null; addressed: boolean; at: number
-  length?: number; tagsOthers?: boolean; replyPing?: boolean; embedOnly?: boolean; expect: Verdict
+  length?: number; tagsOthers?: boolean; replyPing?: boolean; embedOnly?: boolean; ownerIsUs?: boolean; expect: Verdict
 }
-type Vector = { name: string; runtimes?: string[]; group: { allowFrom: string[] }; ignoreChannels?: string[]; steps: Step[] }
+// options: the bridge's own settings, such as ownedThreads; the plugin has none.
+type Vector = { name: string; runtimes?: string[]; options?: Record<string, unknown>; group: { allowFrom: string[] }; ignoreChannels?: string[]; steps: Step[] }
 const file = JSON.parse(readFileSync(join(import.meta.dir, 'testdata', 'gate-vectors.json'), 'utf8')) as { version: number; vectors: Vector[] }
 
 // The vector's group as the access entry of every channel its steps are gated by, and its ignoreChannels.
@@ -19,7 +20,7 @@ function accessOf(v: Vector) {
   return parseAccess(JSON.stringify({ groups: Object.fromEntries([...keys].map(k => [k, v.group])), ignoreChannels: v.ignoreChannels }))
 }
 
-const US = 'us'
+const US = { id: 'us' }
 
 // The step's content: its length, opening with another user's tag when tagsOthers.
 function contentOf(s: Step): string {
@@ -28,15 +29,15 @@ function contentOf(s: Step): string {
   return tag + 'x'.repeat(Math.max(0, (s.length ?? 2000) - tag.length))
 }
 
-// The step as a message for groupMessageOf: replyPing puts us in the mentions
-// as a replied user only, as discord.js does for a quote-reply's ping.
+// The step as a message for groupMessageOf: replyPing puts us in the mentions as a
+// replied user only, as discord.js does for a quote-reply's ping; ownerIsUs makes us the thread's owner.
 function messageOf(s: Step) {
   const content = contentOf(s)
   return {
     author: { id: s.author, bot: s.fromBot }, channelId: s.channel, createdTimestamp: s.at, content,
-    channel: { isThread: () => s.parent !== null, parentId: s.parent },
+    channel: { isThread: () => s.parent !== null, parentId: s.parent, ownerId: s.ownerIsUs ? US.id : 'other' },
     embeds: { length: s.embedOnly ? 1 : 0 },
-    mentions: { has: (u: string, o?: { ignoreRepliedUser?: boolean }) => u === US && s.replyPing === true && !o?.ignoreRepliedUser },
+    mentions: { has: (u: { id: string }, o?: { ignoreRepliedUser?: boolean }) => u === US && s.replyPing === true && !o?.ignoreRepliedUser },
   }
 }
 
@@ -58,8 +59,8 @@ async function mismatches(v: Vector): Promise<string[]> {
   return out
 }
 
-test('the vectors file is version 3', () => {
-  expect(file.version).toBe(3)
+test('the vectors file is version 4', () => {
+  expect(file.version).toBe(4)
 })
 
 test('every gate vector holds', async () => {
