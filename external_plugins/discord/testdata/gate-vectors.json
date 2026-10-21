@@ -77,13 +77,26 @@
       {"author":"9","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":false},
       {"author":"9","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":false}
     ]},
-    {"name":"a denied author's quote-reply is dropped without a quote lookup","group":{"requireMention":false,"botsRequireMention":true,"allowFrom":["1","2"]}, "steps": [
+    {"name":"a denied author's quote-reply is dropped without a quote lookup","group":{"requireMention":true,"allowFrom":["1","2"]}, "steps": [
       {"author":"9","fromBot":false,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":false}
     ]},
     {"name":"a card after a tag neither continues nor breaks the chain","group":{"requireMention":true,"allowFrom":[]}, "steps": [
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"embedOnly":true,"expect":false},
-      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4000,"expect":true}
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":3500,"expect":true}
+    ]},
+    {"name":"a dropped card does not count toward the cap","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":3000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":3500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":5000,"embedOnly":true,"expect":false},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":5500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":6000,"expect":false}
     ]},
     {"name":"a card that quote-replies us is delivered and starts no chain","group":{"requireMention":true,"allowFrom":[]}, "steps": [
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"embedOnly":true,"expect":true},
