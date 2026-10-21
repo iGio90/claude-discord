@@ -1,6 +1,5 @@
-// Discord caps messages at 2000 chars (hard limit — larger sends reject).
-// Split long replies, preferring paragraph boundaries when chunkMode is
-// 'newline'. Every part but the last is longer than limit/2. See DESIGN.md#bot-messages
+// Splits a reply to Discord's 2000-character cap, at paragraphs in 'newline' mode;
+// every part but the last is longer than limit/2. See DESIGN.md#bot-messages
 export function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
   if (text.length <= limit) return [text]
   const out: string[] = []

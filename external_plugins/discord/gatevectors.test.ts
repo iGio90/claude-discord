@@ -2,13 +2,13 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseAccess } from './access.ts'
-import { GroupGate, groupPolicy, isIgnoredChannel } from './groupgate.ts'
+import { GroupGate, groupMessageOf, groupPolicy, isIgnoredChannel } from './groupgate.ts'
 
 // testdata/gate-vectors.json, shared with claude-builder's bridge. See DESIGN.md#bot-messages
 type Verdict = boolean | { plugin: boolean; bridge: boolean }
 type Step = {
   author: string; fromBot: boolean; channel: string; parent: string | null; addressed: boolean; at: number
-  length?: number; tagsOthers?: boolean; embedOnly?: boolean; expect: Verdict
+  length?: number; tagsOthers?: boolean; replyPing?: boolean; embedOnly?: boolean; expect: Verdict
 }
 type Vector = { name: string; runtimes?: string[]; group: { allowFrom: string[] }; ignoreChannels?: string[]; steps: Step[] }
 const file = JSON.parse(readFileSync(join(import.meta.dir, 'testdata', 'gate-vectors.json'), 'utf8')) as { version: number; vectors: Vector[] }
@@ -19,6 +19,27 @@ function accessOf(v: Vector) {
   return parseAccess(JSON.stringify({ groups: Object.fromEntries([...keys].map(k => [k, v.group])), ignoreChannels: v.ignoreChannels }))
 }
 
+const US = 'us'
+
+// The step's content: its length, opening with another user's tag when tagsOthers.
+function contentOf(s: Step): string {
+  if (s.embedOnly) return ''
+  const tag = s.tagsOthers ? '<@999> ' : ''
+  return tag + 'x'.repeat(Math.max(0, (s.length ?? 2000) - tag.length))
+}
+
+// The step as a message for groupMessageOf: replyPing puts us in the mentions
+// as a replied user only, as discord.js does for a quote-reply's ping.
+function messageOf(s: Step) {
+  const content = contentOf(s)
+  return {
+    author: { id: s.author, bot: s.fromBot }, channelId: s.channel, createdTimestamp: s.at, content,
+    channel: { isThread: () => s.parent !== null, parentId: s.parent },
+    embeds: { length: s.embedOnly ? 1 : 0 },
+    mentions: { has: (u: string, o?: { ignoreRepliedUser?: boolean }) => u === US && s.replyPing === true && !o?.ignoreRepliedUser },
+  }
+}
+
 // Each mismatch as "vector #step: what differed"; a denied author or an ignored channel is never asked addressed().
 async function mismatches(v: Vector): Promise<string[]> {
   const gate = new GroupGate()
@@ -26,10 +47,7 @@ async function mismatches(v: Vector): Promise<string[]> {
   const out: string[] = []
   for (const [i, s] of v.steps.entries()) {
     let asked = false
-    const m = {
-      authorId: s.author, fromBot: s.fromBot, channelId: s.channel, parentId: s.parent, at: s.at,
-      length: s.length ?? 2000, tagsOthers: s.tagsOthers ?? false, embedOnly: s.embedOnly ?? false,
-    }
+    const m = groupMessageOf(messageOf(s), US)
     const got = await gate.admitChannel(access, m, async () => { asked = true; return s.addressed })
     const want = typeof s.expect === 'boolean' ? s.expect : s.expect.plugin
     if (got !== want) out.push(`${v.name} #${i}: got ${got}, want ${want}`)
@@ -40,8 +58,8 @@ async function mismatches(v: Vector): Promise<string[]> {
   return out
 }
 
-test('the vectors file is version 2', () => {
-  expect(file.version).toBe(2)
+test('the vectors file is version 3', () => {
+  expect(file.version).toBe(3)
 })
 
 test('every gate vector holds', async () => {

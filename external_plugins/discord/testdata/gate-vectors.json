@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "vectors": [
     {"name":"a tagged two-part bot message is delivered whole under requireMention","group":{"requireMention":true,"allowFrom":[]}, "steps": [
       {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
@@ -148,6 +148,30 @@
     {"name":"a quote-reply to us in an ignored channel or under an ignored parent is dropped without a lookup","group":{"requireMention":true,"allowFrom":[]},"ignoreChannels":["100"], "steps": [
       {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":false},
       {"author":"2","fromBot":true,"channel":"200","parent":"100","addressed":true,"at":1000,"expect":false}
+    ]},
+    {"name":"a quote-reply to us that tags another user is a new message: its reply ping does not hide the tag, and it starts its own chain past the cap","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1100,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1200,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1300,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1400,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1600,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1700,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1800,"length":1600,"replyPing":true,"tagsOthers":true,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1900,"length":1600,"expect":true}
+    ]},
+    {"name":"a quote-reply to us with no tag in its text inside a live chain counts as a follow-up, as a tag does","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1100,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1200,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1300,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1400,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1600,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1700,"length":1600,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1800,"length":1600,"replyPing":true,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1900,"length":1600,"expect":false}
     ]}
   ]
 }

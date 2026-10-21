@@ -164,13 +164,24 @@ part but the last above half the limit, in length mode at the limit and in
 newline mode at the last paragraph, line or space past the half (until
 0.0.11 the space fallback took any space, so a part could be one word). A
 short part therefore ends its chain, and a message that tags a user, a role,
-`@everyone` or `@here` without mentioning us (`tagsOthers()`, read from the
+`@everyone` or `@here` without tagging us (`tagsOthers()`, read from the
 content) never follows: posts put their tags at the start, so such a
 message is a new one for someone else (the cost: a later part that tags
 another agent again is lost to us). Without these, any message by the
 same author within 3 s followed, so "@B check X" then "@G deploy Y" a second
 later woke B for both, against the one-responder rule. The chain keeps the
 length of its last admitted part.
+
+Whether a message tags us is read from its text, never from the automatic
+ping of a quote-reply (`groupMessageOf()`, `mentions.has(us, {
+ignoreRepliedUser: true })`): discord.js puts the replied user in the
+mentions, so a quote-reply to us whose text tags another agent looked like a
+tag of us, continued the chain before it, and at the cap used its last slot,
+dropping the reply's own second part (Builder-GPT's recheck, 2026-10-21).
+Such a reply now never continues: it is addressed on its own, as a reply to
+us, and starts its own chain. A quote-reply to us whose text tags nobody
+still continues a live chain and counts as a follow-up, as a tag of us does.
+Being addressed (`isMentioned()`) still counts the reply.
 
 **Embed-only messages.** A message with embeds and no content (a subagent
 card, a status embed) never continues a chain and never starts one; on a path
@@ -203,7 +214,8 @@ claude-builder `image/bridge/testdata/` holds a byte copy, chosen over a
 cross-repo dependency so neither test suite needs the other's checkout or the
 network. Each vector is a group policy, optional `ignoreChannels`, and steps
 (author, channel, post time `at`, whether it is addressed, `length` of the
-content, default 2,000, `tagsOthers`, default false, `embedOnly`) with the
+content, default 2,000, `tagsOthers`, default false, `replyPing`, a
+quote-reply's ping of us, default false, `embedOnly`) with the
 expected verdict; a step
 whose runtimes differ on purpose gives `{plugin, bridge}`: the bridge ignores
 `requireMention` and needs addressing on every channel message. A vector's

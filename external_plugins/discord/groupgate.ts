@@ -47,9 +47,31 @@ export function embedOnly(content: string, embeds: number): boolean {
   return content === '' && embeds > 0
 }
 
-// The content tags a user, a role, @everyone or @here, and we are not mentioned.
-export function tagsOthers(content: string, mentionsUs: boolean): boolean {
-  return !mentionsUs && TAG.test(content)
+// The content tags a user, a role, @everyone or @here, and does not tag us
+// (tagsUs: from the text, never a reply's automatic ping). See DESIGN.md#bot-messages
+export function tagsOthers(content: string, tagsUs: boolean): boolean {
+  return !tagsUs && TAG.test(content)
+}
+
+// The parts of a discord.js Message the gate reads.
+export type MessageLike<U> = {
+  author: { id: string; bot: boolean }
+  channelId: string
+  channel: { isThread(): boolean; parentId?: string | null }
+  createdTimestamp: number
+  content: string
+  embeds: { length: number }
+  mentions: { has(user: U, options?: { ignoreRepliedUser?: boolean }): boolean }
+}
+
+// The gate's view of a message; whether it tags us ignores the reply ping. See DESIGN.md#bot-messages
+export function groupMessageOf<U>(msg: MessageLike<U>, us: U | null): GroupMessage {
+  const tagsUs = us !== null && msg.mentions.has(us, { ignoreRepliedUser: true })
+  return {
+    authorId: msg.author.id, fromBot: msg.author.bot, channelId: msg.channelId,
+    parentId: msg.channel.isThread() ? msg.channel.parentId ?? null : null, at: msg.createdTimestamp,
+    length: msg.content.length, embedOnly: embedOnly(msg.content, msg.embeds.length), tagsOthers: tagsOthers(msg.content, tagsUs),
+  }
 }
 
 // True when the channel, or a thread's parent, is in ignoreChannels.

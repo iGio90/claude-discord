@@ -42,7 +42,7 @@ import { homedir } from 'os'
 import { join, sep } from 'path'
 import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
 import { chunk } from './chunk.ts'
-import { GroupGate, embedOnly, isAddressed, isIgnoredChannel, reactionAllowed as groupReactionAllowed, reactorIsBot, tagsOthers } from './groupgate.ts'
+import { GroupGate, groupMessageOf, isAddressed, isIgnoredChannel, reactionAllowed as groupReactionAllowed, reactorIsBot } from './groupgate.ts'
 import { defaultAccess, parseAccess, type Access } from './access.ts'
 import { MAX_REACTORS, MAX_REACTOR_LOOKUPS, emojiLabel, historyRow, type ReactionSummary } from './history.ts'
 
@@ -237,18 +237,8 @@ async function gate(msg: Message, replayed = false): Promise<GateResult> {
     return { action: 'pair', code, isResend: false }
   }
 
-  const parentId = msg.channel.isThread() ? msg.channel.parentId : null
-  const mentionsUs = client.user ? msg.mentions.has(client.user) : false
-
   // Keyed on channel ID, not guild ID; threads inherit their parent's entry.
-  const admitted = await groupGate.admitChannel(
-    access,
-    {
-      authorId: senderId, fromBot: msg.author.bot, channelId: msg.channelId, parentId, at: msg.createdTimestamp,
-      length: msg.content.length, embedOnly: embedOnly(msg.content, msg.embeds.length), tagsOthers: tagsOthers(msg.content, mentionsUs),
-    },
-    () => isMentioned(msg, access.mentionPatterns),
-  )
+  const admitted = await groupGate.admitChannel(access, groupMessageOf(msg, client.user), () => isMentioned(msg, access.mentionPatterns))
   return admitted ? { action: 'deliver', access } : { action: 'drop' }
 }
 
