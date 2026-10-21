@@ -258,8 +258,11 @@ message whose author is not a bot, in a thread (`parentId` set) whose
 `ownerId` is our user id, is delivered without being addressed. It is checked
 after the allowlist (and `ignoreChannels`), so a denied author stays dropped,
 and before the addressing rule: such a message needs no mention, starts no
-chain, and is delivered whether or not it also tags another agent, as the
-owner answers for its post. A bot's message there still needs addressing
+chain, and is delivered whether or not it also tags another agent: iGio90
+(2026-10-21) wants every developer message in a post to reach its owner, which
+answers only one that tags nobody else or tags it. The check runs before
+`inOrder`, so an owned message can overtake the same author's addressed message
+still waiting on its reply lookup; it reorders, never drops, and is accepted. A bot's message there still needs addressing
 (the bot rule and its cards stand), and so does a human's message in a thread
 another bot owns; a reviewer tagged once in someone else's post receives the
 tagged message and its split parts only.
