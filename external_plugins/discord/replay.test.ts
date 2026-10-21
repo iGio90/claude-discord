@@ -224,10 +224,11 @@ test('without saved state nothing is fetched', async () => {
 const BOT = '9'
 type Fake = { id: string; author: { id: string } }
 
-function channel(id: string, msgs: Fake[], parentId: string | null = null, threads: { id: string }[] = []) {
+function channel(id: string, msgs: Fake[], parentId: string | null = null, threads: { id: string }[] = [], lastMessageId?: string | null) {
   return {
     id,
     parentId,
+    lastMessageId,
     isThread: () => parentId !== null,
     messages: {
       fetch: async ({ limit, before }: { limit: number; before?: string }) => new Map(
@@ -267,4 +268,35 @@ test('a channel with more missed messages than the fetch cap yields its newest o
   expect(got.map(m => m.id)).toContain(idAt(NOW - MIN, 249))
   expect(got.map(m => m.id)).not.toContain(idAt(NOW - MIN, 129))
   expect(logs.some(l => l.includes('older ones not read'))).toBe(true)
+})
+
+// A shared channel whose one active thread has the given last message id; reads of the thread are counted.
+function quietThread(lastMessageId: string | null | undefined) {
+  const reads = { n: 0 }
+  const thread = channel('20', [{ id: idAt(NOW - 10 * MIN), author: { id: '1' } }], '10', [], lastMessageId)
+  const fetch = thread.messages.fetch
+  thread.messages.fetch = async o => { reads.n++; return fetch(o) }
+  const shared = channel('10', [], null, [thread])
+  const client = { user: { id: BOT }, channels: { fetch: async (id: string) => ({ 10: shared, 20: thread } as Record<string, unknown>)[id] ?? null } }
+  return { client, reads }
+}
+
+const scope = { groups: ['10'], ignored: () => false, known: [], log: () => {} }
+
+test('a thread with nothing newer than the floor is not fetched', async () => {
+  const { client, reads } = quietThread(idAt(NOW - 10 * MIN))
+  await fetchMissed(client as never, scope, () => idAt(NOW - 5 * MIN))
+  expect(reads.n).toBe(0)
+})
+
+test('a channel without a last message id is fetched', async () => {
+  const { client, reads } = quietThread(null)
+  await fetchMissed(client as never, scope, () => idAt(NOW - 5 * MIN))
+  expect(reads.n).toBe(1)
+})
+
+test('the last message id is compared to the floor as a number', async () => {
+  const { client, reads } = quietThread('99')
+  await fetchMissed(client as never, scope, () => '100')
+  expect(reads.n).toBe(0)
 })

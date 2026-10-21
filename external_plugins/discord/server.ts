@@ -41,7 +41,8 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, sep } from 'path'
 import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
-import { GroupGate, isAddressed, reactionAllowed as groupReactionAllowed, reactorIsBot, type Groups } from './groupgate.ts'
+import { GroupGate, isAddressed, reactionAllowed as groupReactionAllowed, reactorIsBot } from './groupgate.ts'
+import { defaultAccess, parseAccess, type Access } from './access.ts'
 import { MAX_REACTORS, MAX_REACTOR_LOOKUPS, emojiLabel, historyRow, type ReactionSummary } from './history.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
@@ -103,43 +104,6 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
 })
 
-type PendingEntry = {
-  senderId: string
-  chatId: string // DM channel ID — where to send the approval confirm
-  createdAt: number
-  expiresAt: number
-  replies: number
-}
-
-type Access = {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
-  allowFrom: string[]
-  /** Keyed on channel ID (snowflake), not guild ID. One entry per guild channel. */
-  groups: Groups
-  pending: Record<string, PendingEntry>
-  mentionPatterns?: string[]
-  /** Channel IDs whose messages and reactions are never delivered; threads follow their parent. Outbound is unaffected. */
-  ignoreChannels?: string[]
-  // delivery/UX config — optional, defaults live in the reply handler
-  /** Emoji to react with on receipt. Empty string disables. Unicode char or custom emoji ID. */
-  ackReaction?: string
-  /** Which chunks get Discord's reply reference when reply_to is passed. Default: 'first'. 'off' = never thread. */
-  replyToMode?: 'off' | 'first' | 'all'
-  /** Max chars per outbound message before splitting. Default: 2000 (Discord's hard cap). */
-  textChunkLimit?: number
-  /** Split on paragraph boundaries instead of hard char count. */
-  chunkMode?: 'length' | 'newline'
-}
-
-function defaultAccess(): Access {
-  return {
-    dmPolicy: 'pairing',
-    allowFrom: [],
-    groups: {},
-    pending: {},
-  }
-}
-
 const MAX_CHUNK_LIMIT = 2000
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
@@ -159,11 +123,6 @@ function assertSendable(f: string): void {
   }
 }
 
-// Keeps the string entries of an array; anything else yields [].
-function strings(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
-}
-
 // True when the channel, or a thread's parent, is in access.ignoreChannels.
 function isIgnoredChannel(access: Access, channelId: string, parentId?: string | null): boolean {
   const ignored = access.ignoreChannels
@@ -173,20 +132,7 @@ function isIgnoredChannel(access: Access, channelId: string, parentId?: string |
 
 function readAccessFile(): Access {
   try {
-    const raw = readFileSync(ACCESS_FILE, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      mentionPatterns: parsed.mentionPatterns,
-      ignoreChannels: parsed.ignoreChannels === undefined ? undefined : strings(parsed.ignoreChannels),
-      ackReaction: parsed.ackReaction,
-      replyToMode: parsed.replyToMode,
-      textChunkLimit: parsed.textChunkLimit,
-      chunkMode: parsed.chunkMode,
-    }
+    return parseAccess(readFileSync(ACCESS_FILE, 'utf8'))
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
     try { renameSync(ACCESS_FILE, `${ACCESS_FILE}.corrupt-${Date.now()}`) } catch {}
@@ -303,7 +249,7 @@ async function gate(msg: Message, replayed = false): Promise<GateResult> {
   // Keyed on channel ID, not guild ID; threads inherit their parent's entry.
   const admitted = await groupGate.admit(
     access.groups,
-    { authorId: senderId, fromBot: msg.author.bot, channelId: msg.channelId, parentId, at: msg.createdTimestamp },
+    { authorId: senderId, fromBot: msg.author.bot, channelId: msg.channelId, parentId, at: msg.createdTimestamp, embedOnly: msg.content === '' && msg.embeds.length > 0 },
     () => isMentioned(msg, access.mentionPatterns),
   )
   return admitted ? { action: 'deliver', access } : { action: 'drop' }

@@ -34,7 +34,11 @@ the active threads under them (one guild-wide `fetchActiveThreads` call per
 guild, kept when their parent is a group and they are not ignored, so the
 feed thread stays undelivered, as live), and every channel with a cursor (DMs,
 threads used lately) is read back to its floor. Private threads the bot has
-not joined are not returned by Discord and are skipped. Every floor is taken
+not joined are not returned by Discord and are skipped. A channel whose
+`lastMessageId` is set and not newer than its floor (compared as numbers) is
+not read: adding a forum to `access.groups` puts all its active posts in
+scope, and a restart then reads only the posts that moved. Without a
+`lastMessageId` the channel is read. Every floor is taken
 at the start of the replay: the channel's cursor or, for a channel without one
 (a thread opened during the gap), the newest cursor of any channel, since ids
 are time-ordered snowflakes. Without any saved state, the first start after
@@ -126,29 +130,70 @@ people: nothing is deleted, and the agent can read a dropped message with
 `fetch_messages`.
 
 **Split messages.** A post longer than 2,000 characters arrives as several
-messages, and only the first carries the mention or the reply. After a bot's
-message is admitted as addressed, the next messages from the same bot in the
-same channel follow it while each is posted within 3 s of the part before it,
-at most 8 parts (the Codex bridge's rule and its measurement, claude-builder
+messages, and only the first carries the mention or the reply. The rule
+applies on every path that needs addressing: `requireMention` (true by
+default, for humans and bots alike) and a bot's message under
+`botsRequireMention`. Until 0.0.11 the plugin answered `requireMention` before
+the chain, so parts 2..N of a tagged post were dropped there; the task forum
+runs with `requireMention: true`, where a tagged long brief must arrive whole.
+A message that needs no addressing (`requireMention: false`, and not a bot's
+under `botsRequireMention`) is delivered outright and keeps no chain.
+
+After a message is admitted as addressed, the next messages from the same
+author in the same channel follow it while each is posted within 3 s of the
+part before it and not before it, at most 8 follow-ups: the first part and 8
+more (the Codex bridge's rule and its measurement, claude-builder
 `image/bridge/DESIGN.md#turn-gating`: parts arrive about 0.5 s apart). The gap
 is measured part to part, not from the first part, because a long message
-posted 0.5 s apart would pass 3 s at its seventh part; the cap of 8 parts
-(16,000 characters after the first) bounds how long a bot that keeps posting
-stays admitted without a new tag. A part posted before the last admitted one
-does not follow it. Post times are compared, so a replay judges them as live
-delivery did. The chain is kept per channel and bot, at most 2,048 pairs, in
-memory.
+posted 0.5 s apart would pass 3 s at its seventh part; the cap (16,000
+characters after the first) bounds how long an author who keeps posting stays
+admitted without a new tag. A tagged part inside a live chain counts as a
+follow-up, so a chain never exceeds 8; the next tagged message after the cap
+starts a new one. Post times are compared, so a replay judges them as live
+delivery did, and a chain expires only against its own author's next
+message, never against another author's later post. The chain is kept per
+channel and author, at most 2,048 pairs (oldest evicted), in memory. The
+allowlist is checked first: a denied author is dropped, addressed or not,
+without the quoted-message lookup, and starts no chain.
 
-**In order.** The messages of one bot in one channel are judged strictly in
-arrival order: each waits for the verdict on the one before it. Without it a
-first part whose reply check needs a fetch (a reply to one of our messages
-older than the last 200 we sent) would still be pending when its second part
-is judged, and the second part, finding no chain yet, would be dropped; the
-live messages the replay held are released together and hit this at once.
-Only the bot rule waits; humans and other channels do not. Because later
-parts wait, the quoted-message lookup is bounded at 1.5 s and then counts as
-not a reply to us: an unbounded `fetchReference` (discord.js retries a slow
-request; up to about a minute) would hold every later part of that bot.
+**Embed-only messages.** A message with embeds and no content (a subagent
+card, a status embed) never continues a chain and never starts one; on a path
+that needs addressing it is delivered only when it is itself addressed,
+which for a card means a quote-reply, since Discord parses mentions from the
+content only. Cards post right after their bot's tagged messages, so
+treating one as a part would wake the tagged agent for every card, and
+letting it start a chain would admit the bot's next untagged text. It does
+not break a chain either: the next text part is judged against the last
+admitted part. Groups that deliver bot messages unaddressed keep delivering
+cards. `server.ts` sets `embedOnly` from `content === ''` and `embeds`.
+
+**In order.** The messages of one author in one channel that need addressing
+are judged strictly in arrival order: each waits for the verdict on the one
+before it. Without it a first part whose reply check needs a fetch (a reply
+to one of our messages older than the last 200 we sent) would still be
+pending when its second part is judged, and the second part, finding no
+chain yet, would be dropped; the live messages the replay held are released
+together and hit this at once. Messages delivered outright and other
+channels or authors do not wait. Because later parts wait, the
+quoted-message lookup is bounded at 1.5 s and then counts as not a reply to
+us: an unbounded `fetchReference` (discord.js retries a slow request; up to
+about a minute) would hold every later part of that author.
+
+**Shared vectors.** The Codex and Gemini bridges of claude-builder gate with
+an adapted copy of this rule (`image/bridge/turngate.ts`), so the behaviour
+is kept as sequence vectors in `testdata/gate-vectors.json`, of which
+claude-builder `image/bridge/testdata/` holds a byte copy, chosen over a
+cross-repo dependency so neither test suite needs the other's checkout or the
+network. Each vector is a group policy and steps (author, channel, post time
+`at`, whether it is addressed, `embedOnly`) with the expected verdict; a step
+whose runtimes differ on purpose gives `{plugin, bridge}`: the bridge ignores
+`requireMention` and needs addressing on every channel message. A vector's
+group is the access entry of every channel its steps are gated by (a step's
+`parent`, else its `channel`), read through `parseAccess` (`access.ts`, the
+loader `server.ts` uses), so a thread step finds the entry only through its
+parent. Runners also check that a denied author is never asked whether it
+is addressed. A change to the behaviour bumps `version` here and in the copy
+in the same pair of commits.
 
 **Replay.** The rule is in `gate()`, which `judgeInbound` runs for live and
 replayed messages alike, so a replayed backlog delivers only what addressed
@@ -157,7 +202,7 @@ us; the 100-message cap counts after it.
 **Limits.** A post meant for every agent that tags nobody now reaches no
 agent: a bot that broadcasts must tag each agent it means. A tag added by
 editing a post wakes nobody, since edits are not delivered; it is re-posted.
-An untagged bot message within 3 s of the same bot's addressed one is taken
+An untagged message within 3 s of the same author's addressed one is taken
 as its continuation. A role mention of a role we hold, or `@everyone`,
 counts as a mention, as for `requireMention`.
 

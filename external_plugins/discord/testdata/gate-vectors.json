@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "vectors": [
+    {"name":"a tagged two-part bot message is delivered whole under requireMention","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":true}
+    ]},
+    {"name":"a tagged two-part human message is delivered whole under requireMention","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":true}
+    ]},
+    {"name":"a tagged part inside a live chain counts as a follow-up","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":3000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":3500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":5000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":5500,"expect":false}
+    ]},
+    {"name":"a chain is the first part and at most 8 follow-ups","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":3000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":5000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":6000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":7000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":8000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":9000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":10000,"expect":false}
+    ]},
+    {"name":"a fresh tag after the cap starts a new chain","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":3000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":5000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":6000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":7000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":8000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":9000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":10000,"expect":false},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":10500,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":11000,"expect":true}
+    ]},
+    {"name":"a part 3,000 ms after the last admitted part follows it","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4000,"expect":true}
+    ]},
+    {"name":"a part 3,001 ms after the last admitted part is dropped","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4001,"expect":false}
+    ]},
+    {"name":"a part posted before the last admitted part is dropped","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":false}
+    ]},
+    {"name":"another author's untagged part in the window is dropped","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"3","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":false}
+    ]},
+    {"name":"the same author in another channel does not continue the chain","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"300","parent":null,"addressed":false,"at":1500,"expect":false}
+    ]},
+    {"name":"a chain expires only against its own author's next message","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"3","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":10000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"expect":true}
+    ]},
+    {"name":"a denied author is dropped when addressed and starts no chain","group":{"requireMention":true,"allowFrom":["1","2"]}, "steps": [
+      {"author":"9","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":false},
+      {"author":"9","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":false}
+    ]},
+    {"name":"a denied author's quote-reply is dropped without a quote lookup","group":{"requireMention":false,"botsRequireMention":true,"allowFrom":["1","2"]}, "steps": [
+      {"author":"9","fromBot":false,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":false}
+    ]},
+    {"name":"a card after a tag neither continues nor breaks the chain","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"embedOnly":true,"expect":false},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":4000,"expect":true}
+    ]},
+    {"name":"a card that quote-replies us is delivered and starts no chain","group":{"requireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"embedOnly":true,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":2000,"expect":false}
+    ]},
+    {"name":"shared channel today: an untagged human message reaches the plugin, not the bridge","group":{"requireMention":false,"botsRequireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":false,"at":1000,"expect":{"plugin":true,"bridge":false}}
+    ]},
+    {"name":"shared channel today: an untagged bot message is dropped","group":{"requireMention":false,"botsRequireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1000,"expect":false}
+    ]},
+    {"name":"shared channel today: a tagged bot message and its next part are delivered","group":{"requireMention":false,"botsRequireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":true}
+    ]},
+    {"name":"shared channel today: a tagged human message and its untagged part are delivered","group":{"requireMention":false,"botsRequireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":true,"at":1000,"expect":true},
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":false,"at":1500,"expect":true}
+    ]},
+    {"name":"shared channel after step 2: an untagged human message is dropped","group":{"requireMention":true,"botsRequireMention":true,"allowFrom":[]}, "steps": [
+      {"author":"1","fromBot":false,"channel":"100","parent":null,"addressed":false,"at":1000,"expect":false}
+    ]},
+    {"name":"a group that delivers bot messages unaddressed still delivers a card to the plugin","group":{"requireMention":false,"allowFrom":[]}, "steps": [
+      {"author":"2","fromBot":true,"channel":"100","parent":null,"addressed":false,"at":1000,"embedOnly":true,"expect":{"plugin":true,"bridge":false}}
+    ]},
+    {"name":"a thread is judged by its parent's entry","group":{"requireMention":true,"allowFrom":["1"]}, "steps": [
+      {"author":"3","fromBot":true,"channel":"200","parent":"100","addressed":true,"at":1000,"expect":false},
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","addressed":true,"at":1000,"expect":true},
+      {"author":"1","fromBot":false,"channel":"200","parent":"100","addressed":false,"at":1500,"expect":true}
+    ]}
+  ]
+}

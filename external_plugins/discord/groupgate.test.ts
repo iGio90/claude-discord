@@ -12,7 +12,7 @@ const T = 1_000_000
 const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
 const on: Groups = { [SHARED]: { requireMention: false, allowFrom: [], botsRequireMention: true, botReactions: false } }
 const off: Groups = { [SHARED]: { requireMention: false, allowFrom: [] } }
-const msg = (o: Partial<GroupMessage> = {}): GroupMessage => ({ authorId: BOT, fromBot: true, channelId: SHARED, parentId: null, at: T, ...o })
+const msg = (o: Partial<GroupMessage> = {}): GroupMessage => ({ authorId: BOT, fromBot: true, channelId: SHARED, parentId: null, at: T, embedOnly: false, ...o })
 const yes = async () => true
 const no = async () => false
 const addressing = (o: Partial<Addressing> = {}): Addressing => ({
@@ -106,6 +106,17 @@ test('parts judged together wait for the first part\'s verdict', async () => {
   const slowYes = async () => { await tick(20); return true }
   const [first, second] = await Promise.all([gate.admit(on, msg(), slowYes), gate.admit(on, msg({ at: T + 500 }), no)])
   expect([first, second]).toEqual([true, true])
+})
+
+test('parts held behind a slow addressed() are judged in order', async () => {
+  const gate = new GroupGate()
+  const forum: Groups = { [SHARED]: { requireMention: true, allowFrom: [] } }
+  const order: string[] = []
+  const slowYes = async () => { await tick(20); return true }
+  const first = gate.admit(forum, msg(), slowYes).then(v => { order.push('first'); return v })
+  const second = gate.admit(forum, msg({ at: T + 500 }), no).then(v => { order.push('second'); return v })
+  expect(await Promise.all([first, second])).toEqual([true, true])
+  expect(order).toEqual(['first', 'second'])
 })
 
 test('a part posted before the last admitted one does not follow it', async () => {

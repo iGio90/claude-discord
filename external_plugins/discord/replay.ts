@@ -314,7 +314,7 @@ export type Scope = {
   log: (msg: string) => void
 }
 
-type History = { id: string; isThread(): boolean; parentId?: string | null; messages: { fetch(o: { limit: number; before?: string }): Promise<Map<string, Message>> } }
+type History = { id: string; isThread(): boolean; parentId?: string | null; lastMessageId?: string | null; messages: { fetch(o: { limit: number; before?: string }): Promise<Map<string, Message>> } }
 type ActiveThreads = { fetchActiveThreads(): Promise<{ threads: ReadonlyMap<string, unknown> }> }
 
 function hasHistory(ch: unknown): ch is History {
@@ -360,12 +360,14 @@ async function scopeChannels(client: Client, scope: Scope): Promise<History[]> {
   return [...out.values()]
 }
 
-// Per channel, the newest messages after its floor, at most fetchCap, not the bot's own.
+// Per channel, the newest messages after its floor, at most fetchCap, not the
+// bot's own; a channel whose last message is not newer than its floor is not read.
 export async function fetchMissed(client: Client, scope: Scope, floorOf: (channelId: string) => string | null, fetchCap = BOUNDS.fetchCap): Promise<Message[]> {
   const out: Message[] = []
   for (const ch of await scopeChannels(client, scope)) {
     const after = floorOf(ch.id)
     if (after === null) continue
+    if (ch.lastMessageId && !newer(ch.lastMessageId, after)) continue
     let before: string | undefined
     let taken = 0
     let capped = false

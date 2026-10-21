@@ -5,7 +5,7 @@ export const MAX_PARTS = 8
 export const QUOTE_LOOKUP_MS = 1_500
 const PARTS_CAP = 2_048
 
-// A bot's split message: the post time of its last admitted part, and how
+// An author's split message: the post time of its last admitted part, and how
 // many parts followed the addressed one.
 type Chain = { last: number; count: number }
 
@@ -20,9 +20,10 @@ export type GroupPolicy = {
 
 export type Groups = Record<string, GroupPolicy>
 
-// A guild-channel message or reaction; at is the message's post time.
+// A guild-channel message or reaction; at is the message's post time, embedOnly
+// a message with embeds and no content.
 export type GroupEvent = { authorId: string; fromBot: boolean; channelId: string; parentId: string | null }
-export type GroupMessage = GroupEvent & { at: number }
+export type GroupMessage = GroupEvent & { at: number; embedOnly: boolean }
 
 // What tells whether a message is addressed to us; quotedAuthor may cost a
 // fetch and counts as unknown after lookupMs. See DESIGN.md#bot-messages
@@ -43,6 +44,11 @@ export function groupPolicy(groups: Groups, e: { channelId: string; parentId: st
 function allowed(policy: GroupPolicy, authorId: string): boolean {
   const allowFrom = policy.allowFrom ?? []
   return allowFrom.length === 0 || allowFrom.includes(authorId)
+}
+
+// requireMention, or a bot's message under botsRequireMention.
+function needsAddressing(policy: GroupPolicy, m: GroupMessage): boolean {
+  return (policy.requireMention ?? true) || (m.fromBot && policy.botsRequireMention === true)
 }
 
 // A mention, a reply to one of our messages, or a mentionPatterns match.
@@ -78,7 +84,7 @@ export function reactionAllowed(groups: Groups, r: GroupEvent): boolean {
   return !(r.fromBot && policy.botReactions === false)
 }
 
-// Remembers each bot's split message per channel, so its later parts follow
+// Remembers each author's split message per channel, so its later parts follow
 // the addressed first one, judged in order. See DESIGN.md#bot-messages
 export class GroupGate {
   private parts = new Map<string, Chain>()
@@ -90,12 +96,11 @@ export class GroupGate {
   async admit(groups: Groups, m: GroupMessage, addressed: () => Promise<boolean>): Promise<boolean> {
     const policy = groupPolicy(groups, m)
     if (!policy || !allowed(policy, m.authorId)) return false
-    if (policy.requireMention ?? true) return addressed()
-    if (!m.fromBot || policy.botsRequireMention !== true) return true
+    if (!needsAddressing(policy, m)) return true
     return this.inOrder(this.key(m), () => this.judge(m, addressed))
   }
 
-  // Runs judge after the previous verdict for the same channel and bot.
+  // Runs judge after the previous verdict for the same channel and author.
   private inOrder(key: string, judge: () => Promise<boolean>): Promise<boolean> {
     const verdict = (this.pending.get(key) ?? Promise.resolve()).then(judge)
     const tail = verdict.then(() => {}, () => {})
@@ -106,7 +111,9 @@ export class GroupGate {
     return verdict
   }
 
+  // An embed-only message neither continues nor starts a chain.
   private async judge(m: GroupMessage, addressed: () => Promise<boolean>): Promise<boolean> {
+    if (m.embedOnly) return addressed()
     const key = this.key(m)
     const chain = this.parts.get(key)
     if (chain && m.at >= chain.last && m.at - chain.last <= this.windowMs && chain.count < this.maxParts) {
