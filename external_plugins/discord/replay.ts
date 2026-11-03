@@ -137,6 +137,10 @@ export class Replay<M extends Msg> {
   private deferred = new Map<string, string>()
   // Per channel, the newest message read, reached once its replays settle.
   private reached = new Map<string, string>()
+  // Per channel, live messages handed on but not yet taken or dropped, and the
+  // ids that settled behind the oldest of them. See DESIGN.md#replay
+  private inflight = new Map<string, Set<string>>()
+  private parked = new Map<string, string[]>()
   private onSettled: () => void = () => {}
 
   constructor(private readonly o: ReplayOptions<M>) {
@@ -161,13 +165,44 @@ export class Replay<M extends Msg> {
     return true
   }
 
-  private advance(m: M): void {
-    if (!this.o.inScope(m)) return
-    if (!this.scanning && !this.waiting.has(m.channelId) && !this.failed.has(m.channelId)) {
-      this.o.cursors.advance(m.channelId, m.id)
+  private advance(channelId: string, id: string): void {
+    if (!this.scanning && !this.waiting.has(channelId) && !this.failed.has(channelId)) {
+      this.moveTo(channelId, id)
       return
     }
-    this.defer(m.channelId, m.id)
+    this.defer(channelId, id)
+  }
+
+  private oldestInflight(channelId: string): string | undefined {
+    let min: string | undefined
+    for (const id of this.inflight.get(channelId) ?? []) if (min === undefined || newer(min, id)) min = id
+    return min
+  }
+
+  // Moves the cursor to id, or parks id while a live message not older is still in flight.
+  private moveTo(channelId: string, id: string): void {
+    const oldest = this.oldestInflight(channelId)
+    if (oldest !== undefined && !newer(oldest, id)) {
+      this.parked.set(channelId, [...(this.parked.get(channelId) ?? []), id])
+      return
+    }
+    this.o.cursors.advance(channelId, id)
+  }
+
+  // A live message settled: it leaves the in-flight set, and the parked ids
+  // now older than every message still in flight move the cursor.
+  private land(channelId: string, id: string, ok: boolean): void {
+    const ids = this.inflight.get(channelId)
+    ids?.delete(id)
+    if (ids?.size === 0) this.inflight.delete(channelId)
+    const oldest = this.oldestInflight(channelId)
+    const parked = [...(this.parked.get(channelId) ?? []), ...(ok ? [id] : [])]
+    const free = parked.filter(p => oldest === undefined || newer(oldest, p))
+    const still = parked.filter(p => !free.includes(p))
+    if (still.length > 0) this.parked.set(channelId, still)
+    else this.parked.delete(channelId)
+    if (free.length === 0) return
+    this.advance(channelId, free.reduce((a, b) => (newer(b, a) ? b : a)))
   }
 
   private defer(channelId: string, id: string): void {
@@ -180,7 +215,7 @@ export class Replay<M extends Msg> {
     for (const pending of [this.reached, this.deferred]) {
       const id = pending.get(channelId)
       pending.delete(channelId)
-      if (id !== undefined) this.o.cursors.advance(channelId, id)
+      if (id !== undefined) this.moveTo(channelId, id)
     }
   }
 
@@ -204,13 +239,17 @@ export class Replay<M extends Msg> {
 
   private async dispatch(m: M, late: boolean): Promise<void> {
     if (!this.claim(m.id)) return
+    const tracked = this.o.inScope(m)
+    if (tracked) this.inflight.set(m.channelId, (this.inflight.get(m.channelId) ?? new Set()).add(m.id))
+    let ok = false
     try {
       const handed = await this.o.handle(m, late)
       if (handed) await handed.taken
-      this.advance(m)
+      ok = true
     } catch (err) {
       this.o.log(`replay: message ${m.id} in ${m.channelId} not delivered: ${err}`)
     }
+    if (tracked) this.land(m.channelId, m.id, ok)
   }
 
   // Fetches, judges and delivers the missed messages, then releases the held

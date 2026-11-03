@@ -57,6 +57,30 @@ test('the cursor advances only once the agent has the message', async () => {
   expect(cursors.get('2')).toBeUndefined()
 })
 
+test('a later message the gate drops does not move the cursor past an earlier one still queued', async () => {
+  const file = cursorFile()
+  const cursors = new Cursors(file, () => {})
+  const [start, held, dropped] = [live(1), live(2), live(3)]
+  cursors.advance('1', start)
+  let take!: () => void
+  const replay = replayOf(cursors, {
+    handle: async m => (m.id === held ? { taken: new Promise<void>(r => (take = r)) } : null),
+  })
+  await replay.run(async () => [])
+  replay.live({ id: held, channelId: '1' })
+  replay.live({ id: dropped, channelId: '1' })
+  await tick(5)
+  const replayed: string[] = []
+  const restarted = replayOf(new Cursors(file, () => {}), {
+    prepare: async m => async () => { replayed.push(m.id); return taken() },
+  })
+  await restarted.run(async floorOf => [held, dropped].filter(id => newer(id, floorOf('1')!)).map(id => ({ id, channelId: '1' })))
+  expect(replayed).toEqual([held, dropped])
+  take()
+  await tick(5)
+  expect(cursors.get('1')).toBe(dropped)
+})
+
 test('a channel out of scope keeps no cursor', async () => {
   const cursors = new Cursors(cursorFile(), () => {})
   const replay = replayOf(cursors, { inScope: m => m.channelId !== '7' })

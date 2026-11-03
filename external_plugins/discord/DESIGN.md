@@ -73,6 +73,22 @@ last 2,048 ids). A message posted during the replay is both fetched and
 received live; the second claim drops it. Across restarts the cursor excludes
 what was handled before.
 
+**Not past a message still in flight.** A live message is in flight from
+when it is claimed until the agent takes it, the gate drops it or its
+delivery fails. A channel's cursor never moves to or past a message of that
+channel still in flight: a later message taken or dropped meanwhile is parked,
+and when the oldest in-flight message settles the cursor moves to the newest
+parked id older than every message still in flight. Without this, a later
+message the gate dropped at once moved the cursor past an earlier one still
+queued behind a busy turn in a bridge's agent, and a restart then lost the
+earlier one for good (post 1567124137082880114: B's and GPT's tags held in
+Builder-Gem's queue while a text-less card edit, dropped, moved the cursor).
+A failed live message stops holding when it fails, as before: later messages
+move the cursor past it. Moves the replay releases (what it read, what it
+deferred, the settle bound's forced release) obey the same rule, so a live
+message held in a bridge's queue keeps its channel's cursor before it for as
+long as it waits.
+
 **Cursor moves during the replay.** While the scan runs, no message moves a
 cursor: the scan does not yet know which channels have a gap. After it, a
 channel's cursor waits while that channel has replayed messages the agent has
