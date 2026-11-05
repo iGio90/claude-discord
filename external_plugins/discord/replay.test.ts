@@ -1,9 +1,9 @@
 // Copied into iGio90/claude-builder image/bridge/ by its sync-replay.ts; edit it here.
 import { expect, test } from 'bun:test'
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { BOUNDS, Cursors, Replay, fetchMissed, floor, newer, select, snowflakeAt, type Handed, type Msg, type ReplayOptions } from './replay.ts'
+import { BOUNDS, Cursors, Replay, fetchMissed, floor, heldBy, newer, requestHold, select, snowflakeAt, type Handed, type Msg, type ReplayOptions } from './replay.ts'
 
 const NOW = Date.parse('2026-10-19T12:00:00Z')
 const MIN = 60_000
@@ -79,6 +79,44 @@ test('a later message the gate drops does not move the cursor past an earlier on
   take()
   await tick(5)
   expect(cursors.get('1')).toBe(dropped)
+})
+
+// A /proc with the boot id and PID 1's start time (field 22) of a container.
+function procOf(start: number): string {
+  const proc = mkdtempSync(join(tmpdir(), 'proc-'))
+  mkdirSync(join(proc, 'sys/kernel/random'), { recursive: true })
+  mkdirSync(join(proc, '1'))
+  writeFileSync(join(proc, 'sys/kernel/random/boot_id'), 'afddbc57-a698-439e-8300-5d3feca07a9a\n')
+  writeFileSync(join(proc, '1/stat'), `1 (docker-init) S 0 1 1 0 -1 4194560 1103 15639 0 86 3 2 17 12 20 0 1 0 ${start} 1134592 163\n`)
+  return proc
+}
+
+// Builder-B, 2026-11-05: a tag notified after the restart request, cut by the
+// recreate before its turn was written, was skipped by the next start.
+test('a restart request holds every cursor, so the next start replays a message handled after it', async () => {
+  const file = cursorFile()
+  const holdFile = join(dirname(file), 'hold.json')
+  const before = procOf(89347294)
+  const cursors = new Cursors(file, () => {}, heldBy(holdFile, before))
+  const replay = replayOf(cursors)
+  await replay.run(async () => [])
+  const [a, b] = [live(1), live(2)]
+  replay.live({ id: a, channelId: '1' })
+  await tick(5)
+  expect(cursors.get('1')).toBe(a)
+  expect(requestHold(holdFile, 'restart', Date.now(), before)).toBe(true)
+  expect(requestHold(holdFile, 'restart', Date.now(), before)).toBe(false)
+  replay.live({ id: b, channelId: '1' })
+  await tick(5)
+  expect(new Cursors(file, () => {}).get('1')).toBe(a)
+  // The recreated container: a new PID 1, so the old hold no longer holds.
+  const restarted = new Cursors(file, () => {}, heldBy(holdFile, procOf(89350001)))
+  const delivered: string[] = []
+  await replayOf(restarted, {
+    prepare: async m => async () => { delivered.push(m.id); return taken() },
+  }).run(async floorOf => [a, b].filter(id => newer(id, floorOf('1')!)).map(id => ({ id, channelId: '1' })))
+  expect(delivered).toEqual([b])
+  expect(restarted.get('1')).toBe(b)
 })
 
 test('a channel out of scope keeps no cursor', async () => {

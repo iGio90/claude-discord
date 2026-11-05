@@ -40,7 +40,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, sep } from 'path'
-import { Cursors, Replay, fetchMissed, type Handed } from './replay.ts'
+import { Cursors, HOLD_FILE, Replay, fetchMissed, heldBy, type Handed } from './replay.ts'
 import { chunk } from './chunk.ts'
 import { GroupGate, groupMessageOf, isAddressed, isIgnoredChannel, reactionAllowed as groupReactionAllowed, reactorIsBot } from './groupgate.ts'
 import { defaultAccess, parseAccess, type Access } from './access.ts'
@@ -820,7 +820,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
 // Live and replayed messages share judgeInbound; see DESIGN.md#replay.
 const replay = new Replay<Message>({
-  cursors: new Cursors(REPLAY_FILE, logLine),
+  cursors: new Cursors(REPLAY_FILE, logLine, heldBy(HOLD_FILE)),
   handle: msg => handleInbound(msg),
   prepare: async msg => {
     const deliver = await judgeInbound(msg, true)
