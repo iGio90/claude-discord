@@ -119,21 +119,24 @@ was notified at 20:17:55Z, and the container was recreated at 20:17:57Z,
 before the turn reached the transcript; the cursor had moved past the tag and
 the next start skipped it. So from the moment the session asks for its own
 recreate, no cursor moves: the asker (claude-builder's `restart` and
-`update` tools) writes `HOLD_FILE`, `/tmp/discord-replay-hold.json`, with
+`update` tools, and its rollout backstop's own request) writes `HOLD_FILE`, `/tmp/discord-replay-hold.json`, with
 `requestHold`, and `Cursors.advance` returns without a write while `heldBy`
-finds a hold there (logged once). The next start replays everything in scope
+finds a hold there (logged once per hold). The next start replays everything in scope
 after the request, within the usual bounds, each with `replayed="true"`,
 including what the agent did handle; agents check that mark. The file names
 the container's incarnation, the boot id and PID 1's start time: `/tmp` is
 outside the home volume, so a recreate drops it, and a container restart or
 host reboot that keeps `/tmp` changes PID 1, so a stale hold never holds a
 later run. A plugin restart inside the same container keeps holding, since
-the recreate is still to come. A hold whose restart never happens (the host
-answered nothing, or a queued rollout waits) holds until the container is
-recreated; the cost is that a later start in that container replays the last
-30 minutes again, marked. A recreate the session did not ask for (another
-agent's roll, a developer's `builder recreate`) writes no hold and keeps the
-loss window.
+the recreate is still to come. The asker drops a hold it wrote once it knows
+no recreate follows (an explicit refusal, an update job ended, a rollout
+intent and request gone); any other failure keeps it, since a kept hold costs
+only marked duplicates and a dropped one can lose a message. A hold whose
+recreate never comes and whose outcome stays unknown (an accepted recreate
+that dies on the host) holds until the container is recreated: a later start
+in that container replays the last 30 minutes again, marked. A recreate this
+container did not ask for (another agent's roll, a developer's `builder
+recreate`) writes no hold and keeps the loss window.
 
 **Not covered.** The replay runs once per process. A gateway reconnect is
 resumed by discord.js, which replays the missed events itself; a session

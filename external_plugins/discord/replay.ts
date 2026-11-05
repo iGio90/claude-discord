@@ -129,6 +129,7 @@ export class Cursors {
       this.holdLogged = true
       return
     }
+    this.holdLogged = false
     const cur = this.ids[channelId]
     if (cur !== undefined && !newer(id, cur)) return
     this.ids[channelId] = id
