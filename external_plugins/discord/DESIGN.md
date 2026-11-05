@@ -17,6 +17,7 @@ start for nothing. A message counts as handled once the agent has it (the
 notification is written; for the Codex and Gemini bridges, the agent took
 the input), or once the gate dropped it, since it was seen and judged. A
 failed delivery does not advance the cursor. The cursor only moves forward,
+and not at all once a restart is requested (below),
 entries older than a week are pruned, and each write goes to a unique
 temporary file renamed over `replay.json`.
 
@@ -110,6 +111,32 @@ message that failed, or that is still waiting in an agent's queue when the
 bound fires (a Codex app-server down for more than ten minutes), is skipped
 if the container restarts before the agent takes it. The log line is the
 record of that.
+
+**Held from a restart request.** A message counts as handled once its
+notification is written, but the turn that handles it can still be lost: on
+2026-11-05 Builder-B called the builder `restart` tool at 20:15:11Z, a tag
+was notified at 20:17:55Z, and the container was recreated at 20:17:57Z,
+before the turn reached the transcript; the cursor had moved past the tag and
+the next start skipped it. So from the moment the session asks for its own
+recreate, no cursor moves: the asker (claude-builder's `restart` and
+`update` tools, and its rollout backstop's own request) writes `HOLD_FILE`, `/tmp/discord-replay-hold.json`, with
+`requestHold`, and `Cursors.advance` returns without a write while `heldBy`
+finds a hold there (logged once per hold). The next start replays everything in scope
+after the request, within the usual bounds, each with `replayed="true"`,
+including what the agent did handle; agents check that mark. The file names
+the container's incarnation, the boot id and PID 1's start time: `/tmp` is
+outside the home volume, so a recreate drops it, and a container restart or
+host reboot that keeps `/tmp` changes PID 1, so a stale hold never holds a
+later run. A plugin restart inside the same container keeps holding, since
+the recreate is still to come. The asker drops a hold it wrote once it knows
+no recreate follows (an explicit refusal, an update job ended, a rollout
+intent and request gone); any other failure keeps it, since a kept hold costs
+only marked duplicates and a dropped one can lose a message. A hold whose
+recreate never comes and whose outcome stays unknown (an accepted recreate
+that dies on the host) holds until the container is recreated: a later start
+in that container replays the last 30 minutes again, marked. A recreate this
+container did not ask for (another agent's roll, a developer's `builder
+recreate`) writes no hold and keeps the loss window.
 
 **Not covered.** The replay runs once per process. A gateway reconnect is
 resumed by discord.js, which replays the missed events itself; a session

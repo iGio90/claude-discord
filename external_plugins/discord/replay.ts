@@ -3,7 +3,7 @@
 // Copied into iGio90/claude-builder image/bridge/ by its sync-replay.ts; edit it here.
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Client, Message } from 'discord.js'
 
 const DISCORD_EPOCH = 1420070400000n
@@ -38,11 +38,63 @@ export function newer(a: string, b: string): boolean {
 
 const SNOWFLAKE = /^\d{1,20}$/
 
+// Written by a restart request; while it names this container, no cursor moves.
+// Outside the home volume, so a recreate drops it. See DESIGN.md#replay
+export const HOLD_FILE = '/tmp/discord-replay-hold.json'
+
+export type Hold = { incarnation: string | null; at: string; reason: string }
+
+// The boot id and PID 1's start time, which a container restart or a reboot
+// changes; null when /proc cannot be read.
+export function incarnation(proc = '/proc'): string | null {
+  try {
+    const boot = readFileSync(join(proc, 'sys/kernel/random/boot_id'), 'utf8').trim()
+    const stat = readFileSync(join(proc, '1/stat'), 'utf8')
+    const start = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]
+    return boot && start && /^\d+$/.test(start) ? `${boot}/${start}` : null
+  } catch {
+    return null
+  }
+}
+
+// The hold of this container in file, or null: none, unreadable or another container's.
+export function heldBy(file: string, proc = '/proc'): () => Hold | null {
+  let self: string | null | undefined
+  return () => {
+    try {
+      const h = JSON.parse(readFileSync(file, 'utf8')) as Hold
+      self ??= incarnation(proc)
+      return typeof h === 'object' && h !== null && h.incarnation === self ? h : null
+    } catch {
+      return null
+    }
+  }
+}
+
+// Holds this container's cursors from now on; false when they were held already.
+export function requestHold(file: string, reason: string, now = Date.now(), proc = '/proc'): boolean {
+  if (heldBy(file, proc)()) return false
+  const hold: Hold = { incarnation: incarnation(proc), at: new Date(now).toISOString(), reason }
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+  try {
+    writeFileSync(tmp, JSON.stringify(hold) + '\n', { mode: 0o600 })
+    renameSync(tmp, file)
+  } finally {
+    rmSync(tmp, { force: true })
+  }
+  return true
+}
+
+export function dropHold(file: string): void {
+  rmSync(file, { force: true })
+}
+
 // Last handled message id per channel or thread, in a JSON file.
 export class Cursors {
   private ids: Record<string, string> = {}
+  private holdLogged = false
 
-  constructor(private readonly file: string, private readonly log: (msg: string) => void) {
+  constructor(private readonly file: string, private readonly log: (msg: string) => void, private readonly held?: () => Hold | null) {
     try {
       const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
       if (typeof parsed !== 'object' || parsed === null) throw new Error('not an object')
@@ -68,8 +120,16 @@ export class Cursors {
     return max
   }
 
-  // Moves forward only; entries older than a week are pruned on write.
+  // Moves forward only, never while a restart is requested; entries older than
+  // a week are pruned on write. See DESIGN.md#replay
   advance(channelId: string, id: string, now = Date.now()): void {
+    const hold = this.held?.()
+    if (hold) {
+      if (!this.holdLogged) this.log(`replay: ${hold.reason} requested at ${hold.at}; cursors held, so the next start replays from there`)
+      this.holdLogged = true
+      return
+    }
+    this.holdLogged = false
     const cur = this.ids[channelId]
     if (cur !== undefined && !newer(id, cur)) return
     this.ids[channelId] = id
